@@ -1,0 +1,323 @@
+"""
+Jax implementation of Householder QR exposing the low-level functionality
+needed for the UTV decomposition.
+
+Adam GM Lewis
+adam.lws@gmail.com
+alewis@perimeterinstitute.ca
+"""
+import jax
+from jax.ops import index_update, index
+import jax.numpy as jnp
+import numpy as np
+import matutils
+from matutils import dag
+
+
+def house(x):
+    """
+    Given a real or complex length-m vector x, finds the Householder vector
+    v and its normalization beta such that H = I - beta * v * dag(v) is
+    the symmetric and unitary Householder matrix representing reflections
+    about x.
+
+    Returns a list [v, beta], where v is a length-m vector whose first
+    component
+    is 1, and beta has the same floating-point type as the input.
+
+    This implementation makes no effort to be jit friendly.
+    """
+    if x.size == 1:
+        return house_size_1(x)
+
+    a = x[1:]
+    sigma = jnp.dot(dag(a), a)
+    v = jnp.ones(x.shape, x.dtype)
+
+    x0 = x[0]
+    if sigma == 0 and x0 >= 0:
+        beta = 0.
+    elif sigma == 0 and x0 < 0:
+        beta = -2.
+    else:
+        mu = jnp.sqrt(x0**2 + sigma)
+        if x[0] <= 0.:
+            v0 = x0 - mu
+        else:
+            v0 = -sigma / (x0 + mu)
+        beta = (2*(v0**2))/(sigma + v0**2)
+    v = index_update(v, index[1:], a/v0)
+    output = [v, beta]
+    return output
+
+
+def house_size_1(x):
+    """
+    Specialization of 'house' to size-1 input.
+    """
+    if x[0] >= 0:
+        beta = 0.
+    elif x[0] < 0:
+        beta = -2.
+    v = jnp.array([1.]).astype(x.dtype)
+    output = [v, beta]
+    return output
+
+
+def form_dense_P(hlist):
+    """
+    Computes the dense Householder matrix P = I - beta * (v otimes dag(v))
+    from the Householder reflector stored as hlist = (v, beta). This is
+    useful for testing.
+    """
+    v, beta = hlist
+    Id = np.eye(v.size, dtype=v.dtype)
+    P = Id - beta * jnp.outer(v, dag(v))
+    return P
+
+
+
+
+def houseInv(a):
+    """
+    Given a real or complex length-(m-1) vector h, finds the Householder vector
+    stored as [v, beta] that reverses the reflection implemented by house(x),
+    x = [1, h].
+    """
+    if jnp.linalg.norm(a)**2 == 0:
+        thestring = "Ijnp.t had zero norm. If this is being triggered in"
+        thestring += " production code you need to implement skipping."
+        raise ValueError(thestring)
+    else:
+        v = jnp.ones(a.size+1)
+        v = index_update(v, index[1:], a)
+        beta = 2 / (jnp.linalg.norm(v)**2)
+        return [v, beta]
+
+
+def apply_house(A, v, beta, pre=True):
+    """
+    Given the m x n matrix A and the length-n vector v with normalization
+    beta such that H = I - beta v dag(v) is the Householder matrix that
+    reflects about v, compute HA (if pre=True) or AH (if pre=False).
+
+    Parameters
+    ----------
+    A:  array_like, shape(M, N)
+        Matrix to be multiplied by H.
+
+    v:  array_like, shape(N).
+        Householder vector.
+
+    beta: float
+        Householder normalization.
+
+    pre: boolean
+        Does HA if true and AH if false.
+
+    Returns
+    -------
+    C = HA (pre=True) or C = AH (pre=False).
+    """
+    normed = beta * v
+    if pre:
+        C = A - jnp.outer(normed, jnp.dot(dag(v), A))
+    else:
+        C = A - jnp.outer(jnp.dot(A, v), dag(normed))
+    return C
+
+
+def factored_to_Q(H, tau):
+    m, n = H.shape
+    Q = jnp.eye(m, dtype=H.dtype)[:, :n]
+    for j in range(n-1, 0, -1):
+        v = jnp.concatenate(jnp.array([1.]), H[j:, j])
+        beta = tau[j]
+        Q = index_update(Q, index[j:, j:], apply_house(Q[j:, j:], v, beta))
+    return Q
+
+def house_qr(A, mode="reduced"):
+    """
+    Performs a QR decomposition of the m x n real or complex matrix A
+    using the Householder algorithm.
+
+    The string parameter 'mode' determines the representation of the output.
+    In this way, one can retrieve various implicit representations of the
+    factored matrices. This can be a significant optimization in the case
+    of a highly rectangular A, which is the reason for this function's
+    existence.
+
+    Parameters
+    ----------
+    A : array_like, shape (M, N)
+            Matrix to be factored.
+
+        mode: {'reduced', 'complete', 'r', 'factored', 'WY'}, optional
+            If K = min(M, N), then:
+              - 'reduced': returns Q, R with dimensions (M, K), (K, N)
+                (default)
+              - 'complete': returns Q, R  with dimensions (M, M), (M, N)
+              - 'r': returns r only with dimensions (K, N)
+              - 'factored': returns H, Tau with dimensions (N, M), (K), read
+                 below for details.
+              - 'WY' : returns W, Y with dimensions (M, K), read below for
+                 details.
+
+    With 'reduced', 'complete', or 'r', this function simply passes to
+    jnp.linalg.qr, which depending on the currect status of Jax may lead to
+    NotImplemented if A is complex.
+
+    With 'factored' this function returns the same H, Tau as generated by
+    the Lapack function dgeqrf() (but in row-major form). Thus,
+    H contains the upper triangular matrix R in its upper triangle, and
+    the j'th Householder reflector forming Q in the j'th column of its
+    lower triangle. Tau[j] contains the normalization factor of the j'th
+    reflector, called 'beta' in the function 'house' in this module.
+
+    The matrix Q is then represented implicitly as
+        Q = H(0) H(1) ... H(K), H(i) = I - tau[i] v dag(v)
+    with v[:j] = 0; v[j]=1; v[j+1:]=A[j+1:, j].
+
+    Application of Q (C -> dag{Q} C) can be made directly from this implicit
+    representation using the function factored_multiply(C). When
+    K << max(M, N), both the QR factorization and multiplication by Q
+    using factored_multiply theoretically require far fewer operations than
+    would an explicit representation of Q. However, these applications
+    are mostly Level-2 BLAS operations.
+
+    With 'WY' this function returns (M, K) matrices W and Y such that
+        Q = I - W dag(Y).
+    Y is lower-triangular matrix of Householder vectors, e.g. the lower
+    triangle
+    of the matrix H resulting from mode='factored'. W is then computed so
+    that the above identity holds.
+
+    Application of Q can be made directly from the WY representation
+    using the function WY_multiply(C). The WY representation is
+    a bit more expensive to compute than the factored one, though still less
+    expensive than the full Q. Its advantage versus 'factored' is that
+    WY_multiply calls depend mostly on Level-3 BLAS operations.
+
+
+    Returns
+    -------
+    Q: ndarray of float or complex, optional
+        The column-orthonormal orthogonal/unitary matrix Q.
+
+    R: ndarray of float or complex, optional.
+        The upper-triangular matrix.
+
+    [H, Tau]: list of ndarrays of float or complex, optional.
+        The matrix H and scaling factors Tau generating Q along with R in the
+        'factored' representation.
+
+    [W, Y] : list of ndarrays of float or complex, optional.
+        The matrices W and Y generating Q along with R in the 'WY'
+        representation.
+
+    Raises
+    ------
+    LinAlgError
+        If factoring fails.
+
+    NotImplementedError
+        In reduced, complete, or r mode with complex ijnp.t.
+        In factored or WY mode in the case M < N.
+    """
+    if mode == "reduced" or mode == "complete" or mode == "r":
+        return jnp.linalg.qr(A, mode=mode)
+    elif mode == "factored":
+        return __house_qr_factored(A)
+    elif mode == "WY":
+        htaulist = __house_qr_factored(A)
+        WYlist = factored_to_WY(htaulist)
+        return WYlist
+
+
+def __house_qr_factored(A):
+    """
+    Computes the QR decomposition of A in the 'factored' representation.
+    This is a workhorse function to be accessed externally by
+    house_qr(A, mode="factored"), and is documented more extensively in
+    that function's documentation.
+
+    """
+    H = A
+    M, N = matutils.matshape(A)
+    Tau = list()
+    for j in range(A.shape[1]):
+        v, beta = house(H[j:, j])
+        Tau.append(beta)
+        H = index_update(H, index[j:, j:], apply_house(H[j:, j:], v, beta))
+        if j < M:
+            H = index_update(H, index[j+1:, j], v[1:])
+    Tau = jnp.array(Tau)
+    output = [H, Tau]
+    return output
+
+
+def factored_to_WY(htaulist):
+    """
+    Converts the 'factored' QR representation [H, Tau] into the WY
+    representation WY.
+
+    Parameters
+    ----------
+    htaulist = [H, Tau] : list of array_like, shapes [M, N] and [N].
+        'factored' QR rep of a matrix A (the output from
+        house_QR(A, mode='factored')).
+
+    Returns
+    -------
+    [W, Y]: list of ndarrays of shapes [M, N].
+        The matrices W and Y generating Q along with R in the 'WY'
+        representation.
+
+    """
+
+    # TODO: Investigate whether it would be more efficient to return dag(W).
+    H, Tau = htaulist
+    Y = jnp.tril(H)
+
+    W = jnp.zeros(H.shape, H.dtype)
+    W = index_update(W, index[:, 0], Tau[0] * H[:, 0])
+    m, r = matutils.matshape(H)
+    for j in range(1, r):
+        vj = H[j:, j]
+        zf = Tau[j] * (jnp.ones(m, dtype=H.dtype) - jnp.dot(W, dag(Y)))
+        z = jnp.dot(zf, vj)
+        W = index_update(W, index[:, j], z)
+    return [W, Y]
+
+
+def factored_multiply(htaulist, C):
+    """
+    Does O = dag(Q) C with Q in the factored representation.
+    """
+    H, Tau = htaulist
+    newC = C
+    m, n = matutils.matsize(H)
+    for j in range(n):
+        thiscol = m - (j + 1)
+        v = jnp.ones(thiscol)
+        v = index_update(v, index[1:], C[j+1:, j])
+        beta = Tau[j]
+        factor = -beta * jnp.outer(v, jnp.dot(dag(v), C[j:, :]))
+        newC = index_update(C, index[j:, :], factor)
+    return newC
+
+
+def WY_multiply(WYlist, C):
+    """
+    Does O = dag(Q) C with Q in the WY representation.
+    """
+    W, Y = WYlist
+    WC = jnp.dot(dag(W), C)
+    out = C - jnp.dot(Y, WC)
+    return out
+
+
+
+
+
+
