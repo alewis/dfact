@@ -178,27 +178,45 @@ class ExplicitQRTests(unittest.TestCase):
         Checks that qr.house_qr(mode="factored") gives the correct output.
         """
         test_me = self.testA
-        H, Tau = qr.house_qr(test_me, mode="factored")
-        correct_tau = jnp.array([2./3., 8./5.])
-        self.assertTrue(jnp.allclose(Tau, correct_tau),
-                        msg="Tau="+str(Tau)+" was wrong.")
+        # print("\n")
+        # print("*****************************")
+        H, beta = qr.house_qr(test_me, mode="factored")
+        correct_beta = jnp.array([2./3., 8./5.])
+        # print("beta:", beta)
+        # print("1/beta:", 1/beta)
+        # print("correct_beta:", correct_beta)
+        # print("*****************************")
+        self.assertTrue(jnp.allclose(beta, correct_beta),
+                        msg="beta="+str(beta)+" was wrong.")
         correct_H = jnp.array([[3., 2.],
                                [-1., 5.],
                                [-1., 0.5]])
         self.assertTrue(jnp.allclose(H, correct_H),
                         msg="\nH=\n"+str(H)+" was wrong.")
 
+        correct_Q = jnp.array([[1./3, -14./15, -2./15],
+                               [2./3, 1./3, -2./3],
+                               [2./3, 2./15, 11./15]
+                               ])
+        Q, R = qr.factored_to_QR(H, beta)
+        self.assertTrue(jnp.allclose(Q, correct_Q),
+                        msg="\nQ=\n"+str(Q)+" was wrong.")
 
-class GaussianHouseholderVectorTests(GaussianMatrixTest):
+        QR = jnp.dot(Q, R)
+        self.assertTrue(jnp.allclose(QR, test_me),
+                        msg="\nQR=\n"+str(QR)+" was wrong.")
+
+
+class TestHouseholderVectorProperties(GaussianMatrixTest):
     """
     Tests the code to compute and apply Householder reflections.
     """
     def __init__(self, *args, **kwargs):
-        ns = (1, 1, 1)
+        ns = (1, 2, 1)
         ms = (1, 5, 1)
         super().__init__(*args, ns=ns, ms=ms, **kwargs)
 
-    def test_householder_unitarity(self, thresh=1E-7):
+    def test_householder_unitarity(self, thresh=1E-6):
         """
         Random (m,) vectors are generated, and Householder reflections
         (v, beta) computed from them. The dense matrix
@@ -209,73 +227,70 @@ class GaussianHouseholderVectorTests(GaussianMatrixTest):
             v, beta = qr.house(A)
             P = qr.form_dense_P([v, beta])
             Pd = dag(P)
-            unitary1 = jnp.dag(P, Pd)
-            unitary2 = jnp.dag(Pd, P)
-            Id = jnp.eye(v.size[0], dtype=P.dtype)
+            unitary1 = jnp.dot(P, Pd)
+            unitary2 = jnp.dot(Pd, P)
+            Id = jnp.eye(v.size, dtype=P.dtype)
             err1, errormsg1 = errstring(unitary1, "P Pd", Id, "I")
             err2, errormsg2 = errstring(unitary2, "Pd P", Id, "I")
             errormsg = ""
             passed = True
-            if err1:
+            if err1 > thresh:
                 passed = False
                 errormsg += "\n" + errormsg1
-            if err2:
+            if err2 > thresh:
                 passed = False
                 errormsg += "\n" + errormsg2
             self.assertTrue(passed, msg=errormsg)
         self.iterloop(impl)
 
 
-class GaussianHouseholderMatrixTests(GaussianMatrixTest):
+
+class TestComputeAndApplyHouseholderReflectors(GaussianMatrixTest):
     """
     Tests the code to compute and apply Householder reflections.
     """
     def __init__(self, *args, **kwargs):
-        ns = (1, 5, 1)
-        ms = (1, 5, 1)
+        ns = (1, 6, 1)
+        ms = (1, 6, 1)
         super().__init__(*args, ns=ns, ms=ms, **kwargs)
 
-    def test_apply_house(self, thresh=1E-6):
+    def test_house_leftmult(self, thresh=1E-6):
         """
         Random (m,n) matrices A are generated, along with length-m vectors x.
         Householder reflections
         (v, beta) are computed from each x. The dense matrix
         P = I_m - beta v otimes dag(v) is formed. It is confirmed
-        that P A and apply_house(A, v, beta) yield the same result.
+        that P A and house_leftmult(A, v, beta) yield the same result.
         """
         def impl(A, paramtup):
             m, n, dtype = paramtup
             x = matutils.gaussian_random(shape=(m,), dtype=dtype)
             v, beta = qr.house(x)
-            PA_h = qr.apply_house(A, v, beta)
+            PA_h = qr.house_leftmult(A, v, beta)
             P = qr.form_dense_P([v, beta])
             PA = jnp.dot(P, A)
             err, errmsg = errstring(PA, "PA", PA_h, "PA_h")
-            self.assertTrue(err<thresh, msg=errmsg)
+            self.assertTrue(err < thresh, msg=errmsg)
         self.iterloop(impl)
 
-
-
-    # def test_house_house_inv(self, thresh=1E-7):
-        # """
-        # Makes random A and x, computes h, beta = house(A) and
-        # h_i, beta_i = houseInv(A), and checks that
-        # applying both in sequence recovers A.
-        # """
-
-        # def impl(A, paramtup):
-            # m, n, dtype = paramtup
-            # x = matutils.gaussian_random(shape=(m,), dtype=dtype)
-            # hvec, beta = qr.house(x)
-            # h_invvec, betainv = qr.houseInv(x)
-            # A_house = qr.apply_house(A, hvec, beta)
-            # A_h_hI = qr.apply_house(A_house, h_invvec, betainv)
-            # error, errormsg = errstring(A, "A", A_h_hI, "A_h_hI")
-            # self.assertTrue(error < thresh, msg=errormsg)
-        # self.iterloop(impl)
-
-
-
+    def test_house_rightmult(self, thresh=1E-6):
+        """
+        Random (m,n) matrices A are generated, along with length-m vectors x.
+        Householder reflections
+        (v, beta) are computed from each x. The dense matrix
+        P = I_n - beta v otimes dag(v) is formed. It is confirmed
+        that A P and house_rightmult(A, v, beta) yield the same result.
+        """
+        def impl(A, paramtup):
+            m, n, dtype = paramtup
+            x = matutils.gaussian_random(shape=(n,), dtype=dtype)
+            v, beta = qr.house(x)
+            AP_h = qr.house_rightmult(A, v, beta)
+            P = qr.form_dense_P([v, beta])
+            AP = jnp.dot(A, P)
+            err, errmsg = errstring(AP, "AP", AP_h, "AP_h")
+            self.assertTrue(err < thresh, msg=errmsg)
+        self.iterloop(impl)
 
 
 
@@ -288,52 +303,137 @@ class GaussianQRTests(GaussianMatrixTest):
 
     """
     def __init__(self, *args, **kwargs):
-        ns = (1, 5, 1)
-        super().__init__(*args, ns=ns, **kwargs)
+        ns = (2, 3, 1)
+        ms = (2, 4, 1)
+        #ns = (2, 3, 1)
+        dtypes = [jnp.float32, jnp.complex64]
+        super().__init__(*args, ns=ns, ms=ms, dtypes=dtypes, **kwargs)
 
-    def test_factored_to_QR(self, thresh=1E-7):
-        """
-        Runs the qr decomposition in 'factored' mode. Factored mode returns
-        matrices H and tau that record the Householder transformations
-        from which Q and R are formed.
+    # def test_against_lapack(self, thresh=1E-7):
+        # """
+        # Checks that the QR decomposition in 'factored' mode agrees with
+        # the LAPACK results accessed via np.linalg.qr(mode='raw').
+        # """
+        # def impl(A, paramtup):
+            # h_test, tau_test = np.linalg.qr(A, mode="raw")
+            # h_jax, beta_jax = qr.house_qr(A, mode="factored")
+            # error1, errormsg1 = errstring(h_test.ravel(), "h_lapack", h_jax.ravel(), "our h")
+            # error2, errormsg2 = errstring(tau_test, "tau_lapack", beta_jax, 
+                                          # "our beta")
+            # success = True
+            # errmsg = ""
+            # if error1 > thresh:
+                # success = False
+                # errmsg += "\n" + errormsg1
+            # if error2 > thresh:
+                # success = False
+                # errmsg += "\n" + errormsg2
+            # self.assertTrue(success, msg=errmsg)
+        # self.iterloop(impl)
 
-        Specifically, R is the upper triangle of H, the Householder vectors
-        mapping A to R are the lower triangle, and the normalizations of those
-        vectors in a certain sense are stored in tau.
 
-        This routine explicitly forms
-        Q from these outputs using qr.factored_to_Q, checks that Q is
-        unitary, and that QR = A
-        to within Frobenius norm 'thresh'.  """
+    # def test_forward_vs_backward_accumulation(self, thresh=1E-6):
+        # """
+        # Checks that Q computed from the factored representation gives the
+        # same result when using either forward or backward accumulation.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # H, betas = qr.house_qr(A, mode="factored")
+            # Im = jnp.eye(m, dtype=A.dtype)
+            # Qforward = qr.factored_rightmult(Im, H, betas)
+            # Qbackward, R = qr.factored_to_QR(H, betas)
+            # err, errmsg = errstring(Qforward, "Qforward", Qbackward, 
+                                    # "Qbackward")
+            # self.assertTrue(err < thresh, msg=errmsg)
+        # self.iterloop(impl)
+
+    def test_rightmult(self, thresh=1E-7):
         def impl(A, paramtup):
-            H_jax, tau_jax = qr.house_qr(A, mode="factored")
-            jaxR = jnp.triu(H_jax)
-            jaxQ = qr.factored_to_Q(H_jax, tau_jax)
-            print(A.shape, jaxQ.shape)
-            Id = jnp.eye(jaxQ.shape[0], dtype=A.dtype)
-            errormsg = ""
-            success = True
+            m, n, dtype = paramtup
+            C = matutils.gaussian_random(shape=(n, m), dtype=dtype)
+            H, betas = qr.house_qr(A, mode="factored")
 
-            unitary_check1 = jnp.dot(jaxQ, dag(jaxQ))
-            error1, errormsg1 = errstring(unitary_check1, "Q Qdag", Id, "I")
-            if error1 < thresh:
-                success = False
-                errormsg += (errormsg1 + "\n")
-
-            unitary_check2 = jnp.dot(dag(jaxQ), jaxQ)
-            error2, errormsg2 = errstring(unitary_check2, "Qdag Q", Id, "I")
-            if error2 < thresh:
-                success = False
-                errormsg += (errormsg2 + "\n")
-
-            nullopcheck = jnp.dot(jaxQ, jaxR)
-            error3, errormsg3 = errstring(nullopcheck, "QR", A, "A")
-            if error3 < thresh:
-                success = False
-                errormsg += (errormsg3 + "\n")
-
-            self.assertTrue(success, msg=errormsg)
+            CQ = qr.factored_rightmult_dense(C, H, betas)
+            CQ2 = qr.factored_rightmult(C, H, betas)
+            err, errmsg = errstring(CQ, "CQ dense", CQ2, "CQ sparse")
+            self.assertTrue(err < thresh, msg=errmsg)
         self.iterloop(impl)
+
+    def test_factored_mult(self, thresh=1E-6):
+        """
+        A = QR -> [H, tau] is computed. R is extracted. We compare
+        C * A with C * Q * R without forming Q explicitly.
+        """
+        def impl(A, paramtup):
+            m, n, dtype = paramtup
+            C = matutils.gaussian_random(shape=(n, m), dtype=dtype)
+            H, betas = qr.house_qr(A, mode="factored")
+            R = jnp.triu(H)
+
+            CA = jnp.dot(C, A)
+            CQ = qr.factored_rightmult(C, H, betas)
+            CQR = CQ@R
+            err, errmsg = errstring(CA, "CA", CQR, "CQR")
+            self.assertTrue(err < thresh, msg=errmsg)
+        self.iterloop(impl)
+
+
+    # def test_factored_to_dense_Q(self, thresh=1E-7):
+        # """
+        # Runs the qr decomposition in 'factored' mode. Factored mode returns
+        # matrices H and tau that record the Householder transformations
+        # from which Q and R are formed.
+
+        # Specifically, R is the upper triangle of H, the Householder vectors
+        # mapping A to R are the lower triangle, and the normalizations of those
+        # vectors in a certain sense are stored in tau.
+
+        # This routine explicitly forms
+        # Q from these outputs using qr.factored_to_Q, checks that Q is
+        # unitary, and that QR = A
+        # to within Frobenius norm 'thresh'.
+        # """
+        # def impl(A, paramtup):
+            # Q, R = np.linalg.qr(A, mode="raw")
+        
+            # print("\nQ:", Q)
+            # print("R:", R)
+            # print("A:",A)
+            # H, betas = qr.house_qr(A, mode="factored")
+            # print("H:",H)
+            # print("beta:", betas)
+            # #print("H, beta", H_jax, tau_jax)
+            # jaxQ, jaxR = qr.factored_to_QR(H, betas)
+            # print("*")
+            # print("myQ:", jaxQ)
+            # #print("myR:", jaxR)
+            # print("myQR:", jnp.dot(jaxQ, jaxR))
+            # Id = jnp.eye(jaxQ.shape[0], dtype=A.dtype)
+            # errormsg = ""
+            # success = True
+
+            # unitary_check1 = jnp.dot(jaxQ, dag(jaxQ))
+            # error1, errormsg1 = errstring(unitary_check1, "Q Qdag", Id, "I")
+            # if error1 > thresh:
+                # success = False
+                # errormsg += "Q wasn't unitary. \n" + errormsg1 + "\n"
+
+            # unitary_check2 = jnp.dot(dag(jaxQ), jaxQ)
+            # error2, errormsg2 = errstring(unitary_check2, "Qdag Q", Id, "I")
+            # if error2 > thresh:
+                # success = False
+                # errormsg += "Q wasn't unitary. \n" + errormsg2 + "\n"
+
+
+            # nullopcheck = jnp.dot(jaxQ, jaxR)
+            # error3, errormsg3 = errstring(nullopcheck, "QR", A, "A")
+            # if error3 > thresh:
+                # errormsg += "QR != A. \n" + errormsg3 + "\n"
+                # success = False
+
+            # self.assertTrue(success, msg=errormsg)
+        # self.iterloop(impl)
 
     # def test_factored_mult(self, thresh=1E-7):
         # """
@@ -606,13 +706,14 @@ class TestUtils(GaussianMatrixTest):
 ###############################################################################
 def suite():
     suite = unittest.TestSuite()
-    #suite.addTests(unittest.makeSuite(TestUtils, 'test'))
-    #suite.addTests(unittest.makeSuite(TestUTV_thin, 'test'))
-    #suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
-    suite.addTests(unittest.makeSuite(GaussianHouseholderVectorTests, 'test'))
-    suite.addTests(unittest.makeSuite(GaussianHouseholderMatrixTests, 'test'))
-    suite.addTests(unittest.makeSuite(ExplicitQRTests, 'test'))
-    # suite.addTests(unittest.makeSuite(GaussianQRTests, 'test'))
+    # suite.addTests(unittest.makeSuite(TestUtils, 'test'))
+    # suite.addTests(unittest.makeSuite(TestUTV_thin, 'test'))
+    # suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
+    # suite.addTests(unittest.makeSuite(TestHouseholderVectorProperties, 'test'))
+    # suite.addTests(unittest.makeSuite(TestComputeAndApplyHouseholderReflectors, 
+                                       # 'test'))
+    #suite.addTests(unittest.makeSuite(ExplicitQRTests, 'test'))
+    suite.addTests(unittest.makeSuite(GaussianQRTests, 'test'))
     return suite
 
 

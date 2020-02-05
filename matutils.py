@@ -6,6 +6,7 @@ from jax.ops import index, index_update
 import time
 
 
+@jax.jit
 def dag(A):
     """
     Hermitian conjugation.
@@ -27,6 +28,17 @@ def trimultdag(A, D, C):
     A @ D @ C where D is a vector of diagonal entries.
     """
     return jnp.dot(A, D[:, None]*C)
+
+
+@jax.jit
+def safe_divide_matmat(A, B):
+    """
+    Returns C, where C=A/B at indices where B!=0, and C=0 where B=0.
+    """
+    safe_idxs = jnp.where(B != 0)
+    C = jnp.zeros(A.shape)
+    C = index_update(C, index[safe_idxs], A[safe_idxs]/B[safe_idxs])
+    return C
 
 
 def subblock_main_diagonal(A, bi=0):
@@ -86,8 +98,9 @@ def gaussian_random_complex64(key=None, shape=()):
     """
     if key is None:
         key = jax.random.PRNGKey(int(time.time()))
-    realpart = jax.random.normal(key, shape=shape, dtype=jnp.float32)
-    imagpart = jax.random.normal(key, shape=shape, dtype=jnp.float32)
+    subkey1, subkey2 = jax.random.split(key, 2)
+    realpart = jax.random.normal(subkey1, shape=shape, dtype=jnp.float32)
+    imagpart = jax.random.normal(subkey2, shape=shape, dtype=jnp.float32)
     output = realpart + 1.0j * imagpart
     return output
 
@@ -98,13 +111,12 @@ def gaussian_random(key=None, shape=(), dtype=jnp.float32):
     in pure jax may be complex. If 'key' is unspecified, a key is generated
     from system time.
     """
-    if key is None:
-        key = jax.random.PRNGKey(int(time.time()))
-
     if dtype == jnp.complex64:
         output = gaussian_random_complex64(key=key, shape=shape)
     elif dtype == jnp.complex128:
         raise NotImplementedError("double precision complex isn't supported")
     else:
+        if key is None:
+            key = jax.random.PRNGKey(int(time.time()))
         output = jax.random.normal(key, shape=shape, dtype=dtype)
     return output
