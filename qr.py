@@ -13,14 +13,15 @@ import numpy as np
 import matutils
 from matutils import dag
 
-
+@jax.jit
 def sign(x):
-    if x == 0:
-        return 0
-    else:
-        return x / jnp.abs(x)
+    # if x == 0:
+    #   return 0
+    # else:
+    #   return x / jnp.abs(x)
+    return jax.lax.cond(x == 0, x, lambda x: 0*x, x, lambda x: x/jnp.abs(x))
 
-
+@jax.jit
 def house(x):
     """
     Given a real or complex length-m vector x, finds the Householder vector
@@ -63,33 +64,32 @@ def house(x):
     x = x.ravel()
     x_2_norm = jnp.linalg.norm(x[1:])
     # The next two lines are logically equivalent to
-    if x_2_norm == 0:
-       v, beta = __house_zero_norm(x)
-    else:
-       v, beta = __house_nonzero_norm( (x, x_2_norm) )
-    switch = x_2_norm == 0
+    # if x_2_norm == 0:
+       # v, beta = __house_zero_norm(x)
+    # else:
+       # v, beta = __house_nonzero_norm( (x, x_2_norm) )
+    switch = (x_2_norm == 0)
     v, beta = jax.lax.cond(switch, x, __house_zero_norm, (x, x_2_norm),
                            __house_nonzero_norm)
     return [v, beta]
 
-
+@jax.jit
 def __house_zero_norm(x):
     """
     Handles house(x) in the case that norm(x[1:])==0.
     """
-    if sign(x[0]) >= 0.:
-        beta = 0.
-    else:
-        beta = 2.
+    beta = 2.
     v = jnp.array([1.] + list(x[1:]), dtype=x.dtype)
+    #beta = jax.lax.cond(x[0]<0, 1., lambda x: 0., 1, lambda x: 0.) 
     return [v, beta]
 
 
+@jax.jit
 def __house_nonzero_norm(xtup):
     """
     Handles house(x) in the case that norm(x[1:])!=0.
     """
-    #x, x_2_norm = xtup
+    x, x_2_norm = xtup
     # v_1 = x[0] - jnp.linalg.norm(x)#+ x_2_norm / jnp.abs(x[0])
     # vraw = jnp.array([v_1]+list(x[1:]), dtype=x.dtype)
     # v = vraw / jnp.linalg.norm(vraw)
@@ -100,14 +100,26 @@ def __house_nonzero_norm(xtup):
     # v_2_norm = jnp.linalg.norm(v_2) 
     # vraw = jnp.array([v_1]+list(v_2), dtype=x.dtype)
     # v = vraw / jnp.linalg.norm(v)
+    #v0 = x[0] + sign(x[0])*jnp.linalg.norm(x)
+    
     x, x_2_norm = xtup
     x_norm = jnp.linalg.norm(jnp.array([x[0], x_2_norm]))
-    v_1 = x[0] - x_norm
+    v_1 = x[0] + sign(x[0])*jnp.linalg.norm(x)
     v_2 = x[1:] / v_1
-    v_2_norm = x_2_norm / jnp.abs(v_1)
-    v_norm_sqr = 1 + v_2_norm**2
-    beta = 2 / v_norm_sqr
     v = jnp.array([1.]+list(v_2), dtype=x.dtype)
+    beta = (2 / (v@dag(v))).real
+    
+
+
+    # x, x_2_norm = xtup
+    # x_norm = jnp.linalg.norm(jnp.array([x[0], x_2_norm]))
+    #v_1 = x[0] - x_norm
+
+    # v_2 = x[1:] / v_1
+    # v_2_norm = x_2_norm / jnp.abs(v_1)
+    # v_norm_sqr = 1 + v_2_norm**2
+    # beta = 2 / v_norm_sqr
+    #v = jnp.array([1.]+list(v_2), dtype=x.dtype)
     return [v, beta]
 
 
