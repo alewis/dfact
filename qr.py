@@ -7,20 +7,32 @@ adam.lws@gmail.com
 alewis@perimeterinstitute.ca
 """
 import jax
-from jax.ops import index_update, index
+from jax.ops import index_update, index_add, index
 import jax.numpy as jnp
 import numpy as np
 import matutils
 from matutils import dag
 
+###############################################################################
+# UTILITIES
+###############################################################################
 @jax.jit
 def sign(x):
-    # if x == 0:
-    #   return 0
-    # else:
-    #   return x / jnp.abs(x)
-    return jax.lax.cond(x == 0, x, lambda x: 0*x, x, lambda x: x/jnp.abs(x))
+    """
+    Sign function using the standard (?) convention sign(x) = x / |x| in
+    the complex case. Returns 0 with the same type as x if x == 0.
+    Note the numpy implementation uses the slightly different convention
+    sign(x) = x / sqrt(x * x).
+    """
+    result = jax.lax.cond(x == 0,
+                          x, lambda x: 0*x,  # 0 with the correct dtype if x==0
+                          x, lambda x: x/jnp.abs(x))  # x/|x| otherwise
+    return result
 
+
+###############################################################################
+# COMPUTATION OF HOUSEHOLDER VECTORS
+###############################################################################
 @jax.jit
 def house(x):
     """
@@ -47,31 +59,19 @@ def house(x):
         v: array_like, shape(m,), the Householder vector including the 1.
         beta: float, the normalization 2/|v|
     """
-    # x = x.ravel()
-    
-    # print("x:",x)
-    # rho = sign(x[0]) * jnp.linalg.norm(x)
-    # v1 = x[0] - rho
-    # v2 = x[1:] / v1
-    # beta = 2 / (1 + jnp.dot(dag(v2), v2))
-    # v = jnp.array([1.] + list(v2))
-    # v0 = jnp.norm(x) * sign(x[0])
-    # v = jnp.array([1.] + x[1:]/v0).astype(x.dtype)
-    # sigma = jnp.linalg.norm(x[1:])
-    # beta = 2*(v0**2)
-    #beta = 2 / jnp.dot(v, dag(v))
-
     x = x.ravel()
     x_2_norm = jnp.linalg.norm(x[1:])
     # The next two lines are logically equivalent to
     # if x_2_norm == 0:
-       # v, beta = __house_zero_norm(x)
+    #   v, beta = __house_zero_norm(x)
     # else:
-       # v, beta = __house_nonzero_norm( (x, x_2_norm) )
+    #   v, beta = __house_nonzero_norm( (x, x_2_norm) )
     switch = (x_2_norm == 0)
-    v, beta = jax.lax.cond(switch, x, __house_zero_norm, (x, x_2_norm),
-                           __house_nonzero_norm)
+    v, beta = jax.lax.cond(switch,
+                           x, __house_zero_norm,
+                           (x, x_2_norm), __house_nonzero_norm)
     return [v, beta]
+
 
 @jax.jit
 def __house_zero_norm(x):
@@ -79,8 +79,12 @@ def __house_zero_norm(x):
     Handles house(x) in the case that norm(x[1:])==0.
     """
     beta = 2.
-    v = jnp.array([1.] + list(x[1:]), dtype=x.dtype)
-    #beta = jax.lax.cond(x[0]<0, 1., lambda x: 0., 1, lambda x: 0.) 
+    v = x
+    v = index_update(v, index[0], 1.)
+    beta = jax.lax.cond(x[0] == 0,
+                        x, lambda x: x[0]*0,
+                        x, lambda x: x[0]*0 + 2
+                        ).real
     return [v, beta]
 
 
@@ -90,39 +94,35 @@ def __house_nonzero_norm(xtup):
     Handles house(x) in the case that norm(x[1:])!=0.
     """
     x, x_2_norm = xtup
-    # v_1 = x[0] - jnp.linalg.norm(x)#+ x_2_norm / jnp.abs(x[0])
-    # vraw = jnp.array([v_1]+list(x[1:]), dtype=x.dtype)
-    # v = vraw / jnp.linalg.norm(vraw)
-    # beta = 2/(jnp.vdot(v, v))
-    # beta = beta.real
-    # print(beta)
-    # v_2 = x[1:] / v_1
-    # v_2_norm = jnp.linalg.norm(v_2) 
-    # vraw = jnp.array([v_1]+list(v_2), dtype=x.dtype)
-    # v = vraw / jnp.linalg.norm(v)
-    #v0 = x[0] + sign(x[0])*jnp.linalg.norm(x)
-    
     x, x_2_norm = xtup
     x_norm = jnp.linalg.norm(jnp.array([x[0], x_2_norm]))
-    v_1 = x[0] + sign(x[0])*jnp.linalg.norm(x)
-    v_2 = x[1:] / v_1
-    v = jnp.array([1.]+list(v_2), dtype=x.dtype)
-    beta = (2 / (v@dag(v))).real
-    
+    rho = sign(x[0])*x_norm
 
+    v_1p = x[0] + rho
+    v_1pabs = jnp.abs(v_1p)
+    v_1m = x[0] - rho
+    v_1mabs = jnp.abs(v_1m)
 
-    # x, x_2_norm = xtup
-    # x_norm = jnp.linalg.norm(jnp.array([x[0], x_2_norm]))
-    #v_1 = x[0] - x_norm
+    # Pick whichever of v[0] = x[0] +- sign(x[0])*||x||
+    # has greater ||v[0]||, and thus leads to greater ||v||.
+    # Golub and van Loan prescribes this "for stability".
+    v_1, v_1abs = jax.lax.cond(v_1pabs >= v_1mabs,
+                               (v_1p, v_1pabs), lambda x: x,
+                               (v_1m, v_1mabs), lambda x: x)
 
-    # v_2 = x[1:] / v_1
-    # v_2_norm = x_2_norm / jnp.abs(v_1)
-    # v_norm_sqr = 1 + v_2_norm**2
-    # beta = 2 / v_norm_sqr
-    #v = jnp.array([1.]+list(v_2), dtype=x.dtype)
+    v = x
+    v = index_update(v, index[1:], v[1:]/v_1)
+    v = index_update(v, index[0], 1.)
+    v_2_norm = x_2_norm / v_1abs
+    v_norm_sqr = 1 + v_2_norm**2
+    beta = (2 / v_norm_sqr).real
     return [v, beta]
 
 
+###############################################################################
+# MANIPULATION OF HOUSEHOLDER VECTORS
+###############################################################################
+@jax.jit
 def form_dense_P(hlist):
     """
     Computes the dense Householder matrix P = I - beta * (v otimes dag(v))
@@ -135,6 +135,7 @@ def form_dense_P(hlist):
     return P
 
 
+@jax.jit
 def house_leftmult(A, v, beta):
     """
     Given the m x n matrix A and the length-n vector v with normalization
@@ -160,6 +161,7 @@ def house_leftmult(A, v, beta):
     return C
 
 
+@jax.jit
 def house_rightmult(A, v, beta):
     """
     Given the m x n matrix A and the length-n vector v with normalization
@@ -185,24 +187,30 @@ def house_rightmult(A, v, beta):
     return C
 
 
+###############################################################################
+# MANIPULATION OF FACTORED QR REPRESENTATION
+###############################################################################
 def factored_rightmult_dense(A, H, betas):
     """
     Computes C = A * Q, where Q is in the factored representation.
     With A = Hbetalist[0].shape[0], this computes Q, but less economically
     than 'factored_to_QR'.
+
+    This is a dense implementation written to test 'factored_rightmult' below.
+    Do not call it in production code.
     """
     C = A
     n = C.shape[1]
-
     for j, beta in enumerate(betas):
         vnz = jnp.array([1.]+list(H[j+1:, j]))
         nminus = n - vnz.size
         v = jnp.array([0.]*nminus + list(vnz))
         P = form_dense_P([v, beta])
-        C = index_update(C, index[:,:], C@P)
-        #C = index_update(C, index[:, j:], house_rightmult(C[:, j:], v, beta))
+        C = index_update(C, index[:, :], C@P)
     return C
 
+
+@jax.jit
 def factored_rightmult(A, H, betas):
     """
     Computes C = A * Q, where Q is in the factored representation.
@@ -210,39 +218,130 @@ def factored_rightmult(A, H, betas):
     than 'factored_to_QR'.
     """
     C = A
-    n = C.shape[1]
-
     for j, beta in enumerate(betas):
         v = jnp.array([1.]+list(H[j+1:, j]))
-        #nminus = n - vnz.size
-        #v = jnp.array([0.]*nminus + list(vnz))
         C = index_update(C, index[:, j:], house_rightmult(C[:, j:], v, beta))
-        #C2 = index_update(C, index[:, j:], house_rightmult(C[:, j:], v, beta))
-        #print(C, C2)
-        
     return C
 
-# def factored_mult_slow(A, H, betas):
-    # C= = A
-    # for j, beta in enumerate(betas):
-        # v = 
 
-def factored_multiply(hbetalist, C):
+@jax.jit
+def factored_to_QR(h, beta):
     """
-    Does O = dag(Q) C with Q in the factored representation.
+    Computes dense matrices Q and R from the factored QR representation
+    [h, tau] as computed by qr with mode == "factored".
     """
-    H, beta = hbetalist
-    newC = C
-    m, n = matutils.matsize(H)
-    for j in range(n):
-        thiscol = m - (j + 1)
-        v = jnp.ones(thiscol)
-        v = index_update(v, index[1:], C[j+1:, j])
-        factor = -beta[j] * jnp.outer(v, dag(v)@C[j:, :])
-        newC = index_update(C, index[j:, :], factor)
-    return newC
+    m, n = h.shape
+    R = jnp.triu(h)
+    Q = jnp.eye(m, dtype=h.dtype)
+    for j in range(n-1, -1, -1):
+        v = jnp.concatenate((jnp.array([1.]), h[j+1:, j]))
+        Q = index_update(Q, index[j:, j:],
+                         house_leftmult(Q[j:, j:], v, beta[j]))
+    out = [Q, R]
+    return out
+
+###############################################################################
+# MANIPULATION OF WY QR REPRESENTATION
+###############################################################################
+@jax.jit
+def times_householder_vector(A, H, j):
+    """
+    Computes A * v_j where v_j is the j'th Householder vector in H.
+
+    Parameters
+    ----------
+    A: k x M matrix to multiply by v_j.
+    H: M x k matrix of Householder reflectors.
+    j: The column of H from which to extract v_j.
+
+    Returns
+    ------
+    vout: length-M vector of output.
+    """
+
+    vin = jnp.array([1.]+list(H[j+1:, j]))
+    vout = jnp.zeros(H.shape[0], dtype=H.dtype)
+    vout = index_update(vout, index[j:], A[:, j:] @ vin)
+    return vout
 
 
+@jax.jit
+def factored_to_WY(hbetalist):
+    """
+    Converts the 'factored' QR representation [H, beta] into the WY
+    representation, Q = I - WY^H.
+
+    Parameters
+    ----------
+    hbetalist = [H, beta] : list of array_like, shapes [M, N] and [N].
+        'factored' QR rep of a matrix A (the output from
+        house_QR(A, mode='factored')).
+
+    Returns
+    -------
+    [W, YH]: list of ndarrays of shapes [M, N].
+        The matrices W and Y generating Q along with R in the 'WY'
+        representation.
+    -W (M x N): The matrix W.
+    -YH (M x N): -Y is the lower triangular matrix with the essential parts of
+                  the Householder reflectors as its columns,
+                  obtained by setting the main diagonal of H to 1 and zeroing
+                  out everything above.
+                 -YH, the h.c. of this matrix, is thus upper triangular
+                  with the full Householder reflectors as its rows. This
+                  function returns YH, which is what one needs to compute
+                  C = Q @ B = (I - WY^H) @ B = B - W @ Y^H @ B.
+
+                  Note: it is more efficient to store W and Y^H separately
+                        than to precompute their product, since we will
+                        typically have N << M when exploiting this
+                        representation.
+    """
+
+    H, betas = hbetalist
+    m, n = matutils.matshape(H)
+    W = jnp.zeros(H.shape, H.dtype)
+    vj = jnp.array([1.]+list(H[1:, 0]))
+    W = index_update(W, index[:, 0], betas[0] * vj)
+
+    Y = jnp.zeros(H.shape, H.dtype)
+    Y = index_update(Y, index[:, 0], vj)
+    for j in range(1, n):
+        vj = index_update(vj, index[j+1:], H[j+1:, j])
+        vj = index_update(vj, index[j], 1.)  # vj[j:] stores the current vector
+        YHv = (dag(Y[j:, :j])) @ vj[j:]
+        z = W[:, :j] @ YHv
+        z = index_add(z, index[j:], -vj[j:])
+        z = index_update(z, index[:], -betas[j]*z)
+
+        W = index_update(W, index[:, j], z)
+        Y = index_update(Y, index[j:, j], vj[j:])
+    YH = dag(Y)
+    return [W, YH]
+
+
+@jax.jit
+def B_times_Q_WY(B, W, YH):
+    """
+    Computes C(kxm) = B(kxm)@Q(mxm) with Q given as W and Y^T in
+    Q = I(mxm) - W(mxr)Y^T(rxm).
+    """
+    C = B - (B@W)@YH
+    return C
+
+@jax.jit
+def WY_to_Q(W, YH):
+    """
+    Retrieves Q from its WY representation.
+    """
+    m = W.shape[0]
+    Id = jnp.eye(m, dtype=W.dtype)
+    return B_times_Q_WY(Id, W, YH)
+
+
+###############################################################################
+# QR DECOMPOSITION
+###############################################################################
 def house_qr(A, mode="reduced"):
     """
     Performs a QR decomposition of the m x n real or complex matrix A
@@ -318,7 +417,7 @@ def house_qr(A, mode="reduced"):
         The matrix H and scaling factors beta generating Q along with R in the
         'factored' representation.
 
-    [W, Y] : list of ndarrays of float or complex, optional.
+    [W, Y, R] : list of ndarrays of float or complex, optional.
         The matrices W and Y generating Q along with R in the 'WY'
         representation.
 
@@ -333,14 +432,24 @@ def house_qr(A, mode="reduced"):
     """
     if mode == "reduced" or mode == "complete" or mode == "r":
         return jnp.linalg.qr(A, mode=mode)
-    elif mode == "factored":
-        return __house_qr_factored(A)
-    elif mode == "WY":
-        hbetalist = __house_qr_factored(A)
-        WYlist = factored_to_WY(hbetalist)
-        return WYlist
+    else:
+        m, n = A.shape
+        if n > m:
+            raise NotImplementedError("n > m QR not implemented in factored"
+                                      + "or WY mode.")
+        if mode == "factored":
+            return __house_qr_factored(A)
+        elif mode == "WY":
+            hbetalist = __house_qr_factored(A)
+            R = jnp.triu(hbetalist[0])
+            WYlist = factored_to_WY(hbetalist)
+            output = WYlist + [R]
+            return output
+        else:
+            raise ValueError("Invalid mode: ", mode)
 
 
+@jax.jit
 def __house_qr_factored(A):
     """
     Computes the QR decomposition of A in the 'factored' representation.
@@ -364,65 +473,6 @@ def __house_qr_factored(A):
     return output
 
 
-def factored_to_QR(h, beta):
-    """
-    Computes dense matrices Q and R from the factored QR representation
-    [h, tau] as computed by qr with mode == "factored".
-    """
-    m, n = h.shape
-    R = jnp.triu(h)
-    Q = jnp.eye(m, dtype=h.dtype)
-    for j in range(n-1, -1, -1):
-        v = jnp.concatenate((jnp.array([1.]), h[j+1:, j]))
-        Q = index_update(Q, index[j:, j:], 
-                         house_leftmult(Q[j:, j:], v, beta[j]))
-    out = [Q, R]
-    return out
-
-
-def factored_to_WY(hbetalist):
-    """
-    Converts the 'factored' QR representation [H, beta] into the WY
-    representation WY.
-
-    Parameters ----------
-    hbetalist = [H, beta] : list of array_like, shapes [M, N] and [N].
-        'factored' QR rep of a matrix A (the output from
-        house_QR(A, mode='factored')).
-
-    Returns
-    -------
-    [W, Y]: list of ndarrays of shapes [M, N].
-        The matrices W and Y generating Q along with R in the 'WY'
-        representation.
-
-    """
-
-    # TODO: Investigate whether it would be more efficient to return dag(W).
-    H, beta = hbetalist
-    Y = jnp.tril(H)
-
-    W = jnp.zeros(H.shape, H.dtype)
-    W = index_update(W, index[:, 0], beta[0] * H[:, 0])
-    m, r = matutils.matshape(H)
-    for j in range(1, r):
-        vj = H[j:, j]
-        zf = beta[j] * (jnp.ones(m, dtype=H.dtype) - jnp.dot(W, dag(Y)))
-        z = jnp.dot(zf, vj)
-        W = index_update(W, index[:, j], z)
-    return [W, Y]
-
-
-
-
-def WY_multiply(WYlist, C):
-    """
-    Does O = dag(Q) C with Q in the WY representation.
-    """
-    W, Y = WYlist
-    WC = jnp.dot(dag(W), C)
-    out = C - jnp.dot(Y, WC)
-    return out
 
 
 
