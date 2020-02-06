@@ -323,11 +323,18 @@ def factored_to_WY(hbetalist):
 @jax.jit
 def B_times_Q_WY(B, W, YH):
     """
-    Computes C(kxm) = B(kxm)@Q(mxm) with Q given as W and Y^T in
+    Computes C(kxm) = B(kxm)@Q(mxm) with Q given as W and Y^H in
     Q = I(mxm) - W(mxr)Y^T(rxm).
     """
     C = B - (B@W)@YH
     return C
+
+@jax.jit
+def Qdag_WY_times_B(B, W, YH):
+    """
+    Computes C(mxk) = QH(mxm)@B(mxk) with Q given as W and Y^H in
+    Q = I(mxm) - W(mxr)Y^T(rxm)
+    """
 
 @jax.jit
 def WY_to_Q(W, YH):

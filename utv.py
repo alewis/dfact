@@ -14,9 +14,11 @@ import jax
 from jax.ops import index_update, index
 import jax.numpy as jnp
 import numpy as np
+import math
+
 import matutils
 from matutils import dag
-import math
+import qr
 
 
 def svd_truncation(A, b=None):
@@ -151,10 +153,9 @@ def rand_range_row(A, b=None, n_iter=1, mode="reduced"):
         for _ in range(n_iter):
             Y = jnp.dot(AdagA, Y)
 
-    Q, _ = jnp.linalg.qr(Y, mode=mode)
+    Qout = qr.house_qr(Y, mode=mode)
     # Now Q is unitary with the same column space as Y.
-    # Q is a (n x b) or (nxn) matrix.
-    return Q
+    return Qout
 
 
 def randSVD(A, k=None, p=5, n_iter=2):
@@ -225,7 +226,7 @@ def randUTV_slow(A, b, q):
             VV = dag(VVh)
             TT = jnp.zeros(Tb.shape, A.dtype)
             TTd = jnp.diag(TTs)
-            TT = index_update(TT, index[:TTd.shape[0], :TTd.shape[1]], 
+            TT = index_update(TT, index[:TTd.shape[0], :TTd.shape[1]],
                               TTd)
         U = index_update(U, index[:, bidx:], jnp.dot(U[:, bidx:], UU))
         V = index_update(V, index[:, bidx:], jnp.dot(V[:, bidx:], VV))
@@ -269,12 +270,14 @@ def stepUTV_slow(A, b=None, p=5, n_iter=1, verbose=False):
     if b is None or b > n:
         b = n
 
-    assert m >= n
+    if m < n:
+        raise NotImplementedError("m < n case of stepUTV_slow not implemented.")
+    #assert m >= n
     assert b > 0
     assert p >= 0
     assert n_iter >= 0
 
-    V = rand_range_row(A, b=b+p, n_iter=n_iter, mode="complete")  # (n x n)
+    V, _ = rand_range_row(A, b=b+p, n_iter=n_iter, mode="complete")  # (n x n)
 
     # First b columns approximately span the singular value space of
     # A.
@@ -338,21 +341,28 @@ def randUTV(A, b=None, q=1, p=0, householder=False):
             ###################################################################
             # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
             ###################################################################
-            VH = rand_range_row(thisblock, b=b, n_iter=q, mode="complete")
-            T = index_update(T, index[:, bi:], jnp.dot(T[:, bi:], VH))
-            V = index_update(V, index[:, bi:], jnp.dot(V[:, bi:], VH))
+            Vh_W, Vh_YH, _ = rand_range_row(thisblock, b=b, n_iter=q,
+                                            mode="WY")
+            T = index_update(T, index[:, bi:],
+                             qr.B_times_Q_WY(T[:, bi:], Vh_W, Vh_YH))
 
-            UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
-            U = index_update(U, index[:, bi:], jnp.dot(U[:, bi:], UH))
+            V = index_update(V, index[:, bi:],
+                             qr.B_times_Q_WY(V[:, bi:], Vh_W, Vh_YH))
+
+            # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
+            Uh_W, Uh_YH, Uh_R = qr.house_qr(T[bi:, bi:J2end], mode="WY")
+            U = index_update(U, index[:, bi:],
+                             qr.B_times_Q_WY(U[:, bi:], Uh_W, Uh_YH))
+            # B_times_Q_WY replaces jnp.dot(U[:, bi:], UH))
             T = index_update(T, index[bi:, J2end:],
-                             jnp.dot(UH, T[bi:, J2end:]))
+                             qr.Qdag_WY_times_B(T[bi:, J2end:], Uh_W, Uh_YH))
             ###################################################################
             # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
             ###################################################################
 
             T = index_update(T, index[I2end:, bi:], 0.)
 
-            Us, Ds, Vsh = jnp.linalg.svd(R[:b, :b])
+            Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
             Vs = dag(Vsh)
             T = index_update(T, index[bi:I2end, bi:J2end], jnp.diag(Ds))
             T = index_update(T, index[bi:I2end, J2end:], jnp.dot(dag(Us),

@@ -365,8 +365,8 @@ class GaussianQRTests(GaussianMatrixTest):
 
     """
     def __init__(self, *args, **kwargs):
-        ns = (1, 10, 1)
-        ms = (1, 10, 1)
+        ns = (1, 6, 1)
+        ms = (1, 6, 1)
         dtypes = [jnp.float32, jnp.complex64]
         super().__init__(*args, ns=ns, ms=ms, dtypes=dtypes, **kwargs)
 
@@ -548,6 +548,24 @@ class GaussianQRTests(GaussianMatrixTest):
             err, errmsg = errstring(BQ, "BQ", BQ_WY, "B(I-WY^T)")
             self.assertLessEqual(err, thresh, msg=errmsg)
 
+    def test_Qdag_WY_times_B(self, thresh=1E-6):
+        """
+        Makes sure that Q^H@B = (I - W Y^H)^H @ B  for Q = I - WY^H, where
+        the RHS is computed implicitly from W and YH.
+        """
+        def impl(A, paramtup):
+            m, n, dtype = paramtup
+            W = A
+            YH = matutils.gaussian_random(shape=(n, m), dtype=dtype)
+            B = matutils.gaussian_random(shape=(m, n), dtype=dtype)
+            Id = jnp.eye(m, dtype=dtype)
+            Q = Id - W @ YH
+
+            QHB = dag(Q)@B
+            QHB_WY = qr.Qdag_WY_times_B(B, W, YH)
+            err, errmsg = errstring(QHB, "QHB", QHB_WY, "(I-WY^T)^H @ B")
+            self.assertLessEqual(err, thresh, msg=errmsg)
+
 class TestRandSVD(GaussianMatrixTest):
     """
     Tests of the randSVD decomposition that loop over Gaussian random matrices.
@@ -583,19 +601,16 @@ class TestRandSVD(GaussianMatrixTest):
         self.iterloop(impl)
 
 
-class TestUTV_thin(GaussianMatrixTest):
+class TestUTV(GaussianMatrixTest):
     """
     Tests of the UTV decomposition that loop over Gaussian random matrices.
-
-    The matrices in these tests are all "thin" (n <= m), which is assumed
-    by the 'slow' algorithm.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def setUp(self):
-        ns = (1, 4, 1)
-        ms = (3, 6, 1)
+        ns = (1, 8, 1)
+        ms = (1, 8, 1)
         dtypes = [jnp.float32, jnp.complex64]
         self.ns = range(*ns)
         self.ms = range(*ms)
@@ -613,8 +628,14 @@ class TestUTV_thin(GaussianMatrixTest):
         numpy SVD.
         """
         def impl(A, paramtup):
-            out_jnp = jnp.linalg.svd(A)
+            m, n, dtype = paramtup
+            if n > m:
+                with self.assertRaises(NotImplementedError):
+                    out_rand = utv.stepUTV_slow(A)
+                return
             out_rand = utv.stepUTV_slow(A)
+            out_jnp = jnp.linalg.svd(A)
+
             svd_sv = out_jnp[1]
             utv_sv = jnp.diag(out_rand[1])
             error, errormsg = errstring(svd_sv, "Numpy SVs", utv_sv,
@@ -628,6 +649,10 @@ class TestUTV_thin(GaussianMatrixTest):
         """
         def impl(A, paramtup):
             m, n, dtype = paramtup
+            if n > m:
+                with self.assertRaises(NotImplementedError):
+                    out = utv.stepUTV_slow(A)
+                return
             U, T, V = utv.stepUTV_slow(A)
             A_UTV = matutils.trimultmat(U, T, dag(V))
             error, errormsg = errstring(A, "Input A", A_UTV, "stepUTV A")
@@ -644,6 +669,10 @@ class TestUTV_thin(GaussianMatrixTest):
         """
         def impl(A, paramtup):
             m, n, dtype = paramtup
+            if n > m:
+                with self.assertRaises(NotImplementedError):
+                    _ = utv.stepUTV_slow(A)
+                return
             out_slow = utv.stepUTV_slow(A)
             out_fast = utv.randUTV_slow(A, n, 1)
             slow_sv = out_slow[1]
@@ -661,20 +690,23 @@ class TestUTV_thin(GaussianMatrixTest):
         def impl(A, paramtup):
             m, n, dtype = paramtup
             for b in range(1, n+1, 1):
-                #print("m=", m, "n=", n, "b=", b, dtype)
-                U, T, V = utv.randUTV_slow(A, b, 1)
-                A_UTV = matutils.trimultmat(U, T, dag(V))
-                error, errormsg = errstring(A, "A", A_UTV,
-                                            "UTV A")
-                Us, Ds, Vhs = jnp.linalg.svd(A)
-                # print("U: \n", U)
-                # print("U svd: \n", Us)
-                # print("V: \n", dag(V))
-                # print("V svd: \n", Vhs)
-                # print("SVDS:", Ds)
-                # print("Error: ", error)
-                # print("***")
                 with self.subTest(b=b):
+                    if n > m:
+                        with self.assertRaises(NotImplementedError):
+                            U, T, V = utv.randUTV_slow(A, b, 1)
+                        return
+                    U, T, V = utv.randUTV_slow(A, b, 1)
+                    A_UTV = matutils.trimultmat(U, T, dag(V))
+                    error, errormsg = errstring(A, "A", A_UTV,
+                                                "UTV A")
+                    Us, Ds, Vhs = jnp.linalg.svd(A)
+                    # print("U: \n", U)
+                    # print("U svd: \n", Us)
+                    # print("V: \n", dag(V))
+                    # print("V svd: \n", Vhs)
+                    # print("SVDS:", Ds)
+                    # print("Error: ", error)
+                    # print("***")
                     self.assertTrue(error < thresh, msg=errormsg)
         self.iterloop(impl)
 
@@ -688,13 +720,14 @@ class TestUTV_thin(GaussianMatrixTest):
         """
         def impl(A, paramtup):
             m, n, dtype = paramtup
-            out_slow = utv.stepUTV_slow(A)
-            out_fast = utv.randUTV(A, b=n, q=1)
-            slow_sv = out_slow[1]
-            fast_sv = out_fast[1]
-            error, errormsg = errstring(slow_sv, "slow UTV SVs", fast_sv,
-                                        "rand_UTV SVs")
-            self.assertTrue(error < thresh, msg=errormsg)
+            U, slow_sv, Vh = jnp.linalg.svd(A)
+            for b in range(1, n+1, 1):
+                with self.subTest(b=b):
+                    out_fast = utv.randUTV(A, b=n, q=1)
+                    fast_sv = jnp.diag(out_fast[1])
+                    error, errormsg = errstring(slow_sv, "slow UTV SVs",
+                                                fast_sv, "rand_UTV SVs")
+                    self.assertTrue(error < thresh, msg=errormsg)
         self.iterloop(impl)
 
     def test_randUTV_reconstruction(self, thresh=1E-5):
@@ -705,12 +738,11 @@ class TestUTV_thin(GaussianMatrixTest):
         def impl(A, paramtup):
             m, n, dtype = paramtup
             for b in range(1, n+1, 1):
-                U, T, V = utv.randUTV(A, b=n, q=1)
-                A_UTV = matutils.trimultmat(U, T, dag(V))
-                error, errormsg = errstring(A, "A", A_UTV,
-                                            "UTV A")
-                Us, Ds, Vhs = jnp.linalg.svd(A)
                 with self.subTest(b=b):
+                    U, T, V = utv.randUTV(A, b=n, q=1)
+                    A_UTV = matutils.trimultmat(U, T, dag(V))
+                    error, errormsg = errstring(A, "A", A_UTV,
+                                                "UTV A")
                     self.assertTrue(error < thresh, msg=errormsg)
         self.iterloop(impl)
 
@@ -746,12 +778,12 @@ class TestUtils(GaussianMatrixTest):
 
 def suite():
     suite = unittest.TestSuite()
-    # suite.addTests(unittest.makeSuite(TestUtils, 'test'))
-    # suite.addTests(unittest.makeSuite(TestUTV_thin, 'test'))
-    # suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
-    # suite.addTests(unittest.makeSuite(TestHouseholderVectorProperties, 'test'))
-    # suite.addTests(unittest.makeSuite(TestComputeAndApplyHouseholderReflectors,
-                                      # 'test'))
+    suite.addTests(unittest.makeSuite(TestUtils, 'test'))
+    suite.addTests(unittest.makeSuite(TestUTV, 'test'))
+    suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
+    suite.addTests(unittest.makeSuite(TestHouseholderVectorProperties, 'test'))
+    suite.addTests(unittest.makeSuite(TestComputeAndApplyHouseholderReflectors,
+                                      'test'))
     # 'ExplicitQRTests' is commented out because it is wrong.
     # suite.addTests(unittest.makeSuite(ExplicitQRTests, 'test'))
     suite.addTests(unittest.makeSuite(GaussianQRTests, 'test'))
