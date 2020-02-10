@@ -1,6 +1,6 @@
 """
 Tests for functions in utv.py and qr.py.
-To run all tests from the command line: $ python utv_tests.py
+to run all tests from the command line: $ python utv_tests.py
 
 To run the tests instantiated in 'def suite()' near the end of this file
 from a Colab or Jupyter Notebook:
@@ -609,126 +609,128 @@ class TestUTV(GaussianMatrixTest):
         super().__init__(*args, **kwargs)
 
     def setUp(self):
-        ns = (1, 8, 1)
-        ms = (1, 8, 1)
-        dtypes = [jnp.float32, jnp.complex64]
+        ns = (4, 5, 1)
+        ms = (4, 5, 1)
+        dtypes = [jnp.float32]#, jnp.complex64]
         self.ns = range(*ns)
         self.ms = range(*ms)
         self.dtypes = dtypes
-        self.matrices = [matutils.gaussian_random(shape=(m, n), dtype=dtype)
-                         for m, n, dtype
+        # self.matrices = [matutils.gaussian_random(shape=(m, n), dtype=dtype)
+                         # for m, n, dtype
+                         # in itertools.product(self.ms, self.ns, self.dtypes)]
+        self.matrices = [jnp.ones((m,n), dtype=dtype) for m, n, dtype
                          in itertools.product(self.ms, self.ns, self.dtypes)]
 
     ###########################################################################
     # stepUTV
     ###########################################################################
-    def test_stepUTV_slow_svs(self, thresh=1E-5):
-        """
-        Tests the singular values from utv.stepUTV_slow against those from a
-        numpy SVD.
-        """
-        def impl(A, paramtup):
-            m, n, dtype = paramtup
-            if n > m:
-                with self.assertRaises(NotImplementedError):
-                    out_rand = utv.stepUTV_slow(A)
-                return
-            out_rand = utv.stepUTV_slow(A)
-            out_jnp = jnp.linalg.svd(A)
+    # def test_stepUTV_slow_svs(self, thresh=1E-5):
+        # """
+        # Tests the singular values from utv.stepUTV_slow against those from a
+        # numpy SVD.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # if n > m:
+                # with self.assertRaises(NotImplementedError):
+                    # out_rand = utv.stepUTV_slow(A)
+                # return
+            # out_rand = utv.stepUTV_slow(A)
+            # out_jnp = jnp.linalg.svd(A)
 
-            svd_sv = out_jnp[1]
-            utv_sv = jnp.diag(out_rand[1])
-            error, errormsg = errstring(svd_sv, "Numpy SVs", utv_sv,
-                                        "rand_UTV SVs")
-            self.assertTrue(error < thresh, msg=errormsg)
-        self.iterloop(impl)
+            # svd_sv = out_jnp[1]
+            # utv_sv = jnp.diag(out_rand[1])
+            # error, errormsg = errstring(svd_sv, "Numpy SVs", utv_sv,
+                                        # "rand_UTV SVs")
+            # self.assertTrue(error < thresh, msg=errormsg)
+        # self.iterloop(impl)
 
-    def test_stepUTV_reconstruction(self, thresh=1E-5):
-        """
-        Checks that stepUTV correctly reconstructs its input.
-        """
-        def impl(A, paramtup):
-            m, n, dtype = paramtup
-            if n > m:
-                with self.assertRaises(NotImplementedError):
-                    out = utv.stepUTV_slow(A)
-                return
-            U, T, V = utv.stepUTV_slow(A)
-            A_UTV = matutils.trimultmat(U, T, dag(V))
-            error, errormsg = errstring(A, "Input A", A_UTV, "stepUTV A")
-            self.assertTrue(error < thresh, msg=errormsg)
-        self.iterloop(impl)
+    # def test_stepUTV_reconstruction(self, thresh=1E-5):
+        # """
+        # Checks that stepUTV correctly reconstructs its input.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # if n > m:
+                # with self.assertRaises(NotImplementedError):
+                    # out = utv.stepUTV_slow(A)
+                # return
+            # U, T, V = utv.stepUTV_slow(A)
+            # A_UTV = matutils.trimultmat(U, T, dag(V))
+            # error, errormsg = errstring(A, "Input A", A_UTV, "stepUTV A")
+            # self.assertTrue(error < thresh, msg=errormsg)
+        # self.iterloop(impl)
 
-    ###########################################################################
-    # randUTV_slow
-    ###########################################################################
-    def test_randUTVslow_svs(self, thresh=1E-5):
-        """
-        Tests the singular values from randUTV against those from
-        stepUTV_slow, using blocksize = number of columns.
-        """
-        def impl(A, paramtup):
-            m, n, dtype = paramtup
-            if n > m:
-                with self.assertRaises(NotImplementedError):
-                    _ = utv.stepUTV_slow(A)
-                return
-            out_slow = utv.stepUTV_slow(A)
-            out_fast = utv.randUTV_slow(A, n, 1)
-            slow_sv = out_slow[1]
-            fast_sv = out_fast[1]
-            error, errormsg = errstring(slow_sv, "slow UTV SVs", fast_sv,
-                                        "rand_UTV SVs")
-            self.assertTrue(error < thresh, msg=errormsg)
-        self.iterloop(impl)
+    # ###########################################################################
+    # # randUTV_slow
+    # ###########################################################################
+    # def test_randUTVslow_svs(self, thresh=1E-5):
+        # """
+        # Tests the singular values from randUTV against those from
+        # stepUTV_slow, using blocksize = number of columns.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # if n > m:
+                # with self.assertRaises(NotImplementedError):
+                    # _ = utv.stepUTV_slow(A)
+                # return
+            # out_slow = utv.stepUTV_slow(A)
+            # out_fast = utv.randUTV_slow(A, n, 1)
+            # slow_sv = out_slow[1]
+            # fast_sv = out_fast[1]
+            # error, errormsg = errstring(slow_sv, "slow UTV SVs", fast_sv,
+                                        # "rand_UTV SVs")
+            # self.assertTrue(error < thresh, msg=errormsg)
+        # self.iterloop(impl)
 
-    def test_randUTVslow_reconstruction(self, thresh=1E-5):
-        """
-        Tests that A can be recovered from randUTV_slow, using various
-        blocksizes.
-        """
-        def impl(A, paramtup):
-            m, n, dtype = paramtup
-            for b in range(1, n+1, 1):
-                with self.subTest(b=b):
-                    if n > m:
-                        with self.assertRaises(NotImplementedError):
-                            U, T, V = utv.randUTV_slow(A, b, 1)
-                        return
-                    U, T, V = utv.randUTV_slow(A, b, 1)
-                    A_UTV = matutils.trimultmat(U, T, dag(V))
-                    error, errormsg = errstring(A, "A", A_UTV,
-                                                "UTV A")
-                    Us, Ds, Vhs = jnp.linalg.svd(A)
-                    # print("U: \n", U)
-                    # print("U svd: \n", Us)
-                    # print("V: \n", dag(V))
-                    # print("V svd: \n", Vhs)
-                    # print("SVDS:", Ds)
-                    # print("Error: ", error)
-                    # print("***")
-                    self.assertTrue(error < thresh, msg=errormsg)
-        self.iterloop(impl)
+    # def test_randUTVslow_reconstruction(self, thresh=1E-5):
+        # """
+        # Tests that A can be recovered from randUTV_slow, using various
+        # blocksizes.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # for b in range(1, n+1, 1):
+                # with self.subTest(b=b):
+                    # if n > m:
+                        # with self.assertRaises(NotImplementedError):
+                            # U, T, V = utv.randUTV_slow(A, b, 1)
+                        # return
+                    # U, T, V = utv.randUTV_slow(A, b, 1)
+                    # A_UTV = matutils.trimultmat(U, T, dag(V))
+                    # error, errormsg = errstring(A, "A", A_UTV,
+                                                # "UTV A")
+                    # Us, Ds, Vhs = jnp.linalg.svd(A)
+                    # # print("U: \n", U)
+                    # # print("U svd: \n", Us)
+                    # # print("V: \n", dag(V))
+                    # # print("V svd: \n", Vhs)
+                    # # print("SVDS:", Ds)
+                    # # print("Error: ", error)
+                    # # print("***")
+                    # self.assertTrue(error < thresh, msg=errormsg)
+        # self.iterloop(impl)
 
-    ###########################################################################
-    # randUTV
-    ###########################################################################
-    def test_randUTV_svs(self, thresh=1E-5):
-        """
-        Tests the singular values from randUTV against those from
-        stepUTV_slow, using blocksize = number of columns.
-        """
-        def impl(A, paramtup):
-            m, n, dtype = paramtup
-            U, slow_sv, Vh = jnp.linalg.svd(A)
-            for b in range(1, n+1, 1):
-                with self.subTest(b=b):
-                    out_fast = utv.randUTV(A, b=n, q=1)
-                    fast_sv = jnp.diag(out_fast[1])
-                    error, errormsg = errstring(slow_sv, "slow UTV SVs",
-                                                fast_sv, "rand_UTV SVs")
-                    self.assertTrue(error < thresh, msg=errormsg)
-        self.iterloop(impl)
+    # ###########################################################################
+    # # randUTV
+    # ###########################################################################
+    # def test_randUTV_svs(self, thresh=1E-5):
+        # """
+        # Tests the singular values from randUTV against those from
+        # stepUTV_slow, using blocksize = number of columns.
+        # """
+        # def impl(A, paramtup):
+            # m, n, dtype = paramtup
+            # U, slow_sv, Vh = jnp.linalg.svd(A)
+            # for b in range(1, n+1, 1):
+                # with self.subTest(b=b):
+                    # out_fast = utv.randUTV(A, b=b, q=1)
+                    # fast_sv = jnp.diag(out_fast[1])
+                    # error, errormsg = errstring(slow_sv, "slow UTV SVs",
+                                                # fast_sv, "rand_UTV SVs")
+                    # self.assertTrue(error < thresh, msg=errormsg)
+        # self.iterloop(impl)
 
     def test_randUTV_reconstruction(self, thresh=1E-5):
         """
@@ -737,9 +739,10 @@ class TestUTV(GaussianMatrixTest):
         """
         def impl(A, paramtup):
             m, n, dtype = paramtup
-            for b in range(1, n+1, 1):
+            for b in range(2, n+1, 1):
+                print("b=",b)
                 with self.subTest(b=b):
-                    U, T, V = utv.randUTV(A, b=n, q=1)
+                    U, T, V = utv.randUTV(A, b=b, q=1)
                     A_UTV = matutils.trimultmat(U, T, dag(V))
                     error, errormsg = errstring(A, "A", A_UTV,
                                                 "UTV A")
@@ -778,15 +781,15 @@ class TestUtils(GaussianMatrixTest):
 
 def suite():
     suite = unittest.TestSuite()
-    suite.addTests(unittest.makeSuite(TestUtils, 'test'))
+    #suite.addTests(unittest.makeSuite(TestUtils, 'test'))
     suite.addTests(unittest.makeSuite(TestUTV, 'test'))
-    suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
-    suite.addTests(unittest.makeSuite(TestHouseholderVectorProperties, 'test'))
-    suite.addTests(unittest.makeSuite(TestComputeAndApplyHouseholderReflectors,
-                                      'test'))
+    # suite.addTests(unittest.makeSuite(TestRandSVD, 'test'))
+    # suite.addTests(unittest.makeSuite(TestHouseholderVectorProperties, 'test'))
+    # suite.addTests(unittest.makeSuite(TestComputeAndApplyHouseholderReflectors,
+                                      # 'test'))
     # 'ExplicitQRTests' is commented out because it is wrong.
     # suite.addTests(unittest.makeSuite(ExplicitQRTests, 'test'))
-    suite.addTests(unittest.makeSuite(GaussianQRTests, 'test'))
+    #suite.addTests(unittest.makeSuite(GaussianQRTests, 'test'))
     return suite
 
 

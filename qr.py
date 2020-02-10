@@ -335,6 +335,8 @@ def Qdag_WY_times_B(B, W, YH):
     Computes C(mxk) = QH(mxm)@B(mxk) with Q given as W and Y^H in
     Q = I(mxm) - W(mxr)Y^T(rxm)
     """
+    C = B - dag(YH)@(dag(W)@B)
+    return C
 
 @jax.jit
 def WY_to_Q(W, YH):

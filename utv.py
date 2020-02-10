@@ -12,12 +12,15 @@ Gregorio Quintana-Orti, and Nathan Heavner at https://github.com/flame/randutv.
 
 import jax
 from jax.ops import index_update, index
+from jax.lax import cond
 import jax.numpy as jnp
 import numpy as np
 import math
+from functools import partial
 
 import matutils
 from matutils import dag
+
 import qr
 
 
@@ -133,29 +136,86 @@ def rand_range_row(A, b=None, n_iter=1, mode="reduced"):
     AssertionError unless k > 0, p>=0, n_iter>=0.
 
     """
-    try:
-        m, n = A.shape
-    except ValueError:
-        raise ValueError("A had invalid shape: ", A.shape)
+    m, n = A.shape
+    b = cond(b is None or b > n,
+             n, lambda x: x,
+             b, lambda x: x)
 
-    if b is None or b > n:
-        b = n
-
-    assert b > 0
-    assert n_iter >= 0
-
+    # assert n_iter >= 0
     # G = jnp.random.randn(m, b)  # The Gaussian random subspace.
     G = matutils.gaussian_random(shape=(m, b), dtype=A.dtype)
     Y = jnp.dot(dag(A), G)  # (n x b) projection of A onto that subspace.
 
-    if n_iter > 0:  # Power iterations speed the decay of Y's singular values.
-        AdagA = jnp.dot(dag(A), A)
-        for _ in range(n_iter):
-            Y = jnp.dot(AdagA, Y)
+    # if n_iter > 0:
+    # Power iterations speed the decay of Y's singular values.
+    AdagA = jnp.dot(dag(A), A)
+    for _ in range(n_iter):
+        Y = jnp.dot(AdagA, Y)
 
     Qout = qr.house_qr(Y, mode=mode)
     # Now Q is unitary with the same column space as Y.
     return Qout
+
+
+@jax.jit
+def rand_range_row_jit(A, G, q=2):
+    """
+    Jit implementation of
+    randomized range finding. Starting from a general (m x n) matrix
+    A, a (n x b) with b<=m matrix, Q, is sought such that
+    ||I - Q Q^dag A|| is minimized.
+
+    It is fairly straightforward to modify this algorithm so that k is
+    instead chosen dynamically in such a way that the error function is
+    bound by some chosen epsilon. I haven't done this because the code is
+    slightly more complicated (the QR algorithm must be written out and
+    slightly modified).
+
+    If full=False:
+        This function returns a (n x b) matrix.
+
+    If full=True:
+        This function returns a (n x n) matrix.
+
+    Arguments
+    ---------
+    A (array): The m x n matrix to be factorized.
+    G (array): An m x b array that will be overwritten with random
+               numbers.
+    n_iter (int)   : Number of power iterations
+
+    Returns
+    -------
+    The n x b matrix (full=False) or n x n matrix (full=True)
+    Q s.t. A ~ Q Q^dag A.
+        A point of confusion: Q is supposed to be unitary, so isn't
+                              Q Q^dag = I?
+
+    Exceptions
+    ----------
+    ValueError when A is not a two-dimensional matrix.
+    AssertionError unless k > 0, p>=0, n_iter>=0.
+
+    """
+    m, n = A.shape
+    # assert n_iter >= 0
+    # G = jnp.random.randn(m, b)  # The Gaussian random subspace.
+    G = index_update(G, index[:], matutils.gaussian_random_fill(G))
+    Y = dag(A) @ G  # (n x b) projection of A onto that subspace.
+
+    # if n_iter > 0:
+    # Power iterations speed the decay of Y's singular values.
+    # TODO How can we loop a dynamical number of times??
+    AdagA = dag(A) @ A
+    #for _ in range(q):
+    for _ in range(2):
+        Y = index_update(Y, index[:], AdagA@Y)
+
+    Qout = qr.house_qr(Y, mode="WY")
+    # Now Q is unitary with the same column space as Y.
+    return Qout
+
+
 
 
 def randSVD(A, k=None, p=5, n_iter=2):
@@ -307,87 +367,143 @@ def stepUTV_slow(A, b=None, p=5, n_iter=1, verbose=False):
     return output
 
 
-def randUTV(A, b=None, q=1, p=0, householder=False):
+def randUTV(A, b, q=1, p=0):
+    """
+    Performs the "optimized" randUTV in Figure4 of the paper.
+
+    This is an interface function housing anything we don't want to Jit.
+
+    Arguments
+    ---------
+    A: (m x n) matrix to be factorized.
+    b (int): block size.
+    q (int): Number of power iterations, a hyperparameter.
+    p (int): Amount of oversampling, a hyperparameter. Currently does nothing.
+    householder:If True, exploit the Householder structure of the QR
+        decompositions to speed up the transformation.
+    """
+    Gwork = jnp.zeros((A.shape[0], b), dtype=A.dtype)
+    U, T, V = __randUTV_work(A, Gwork, q=q, p=p)
+    print("result:", U@T@dag(V))
+    
+    return [U, T, V]
+
+
+def __randUTV_block(bj, b, B1, I2, J2, B3, B2B3, Gwork, U, T, V):
+    print("block")
+    # TODO: halt at desired accuracy.
+    # Very strange things happen with Jit if we try to refactor
+    # this code block into a subroutine!
+
+    # Get array indexes ready.
+    # print(B1)
+    # print(I2)
+    # print(J2)
+    # print(B3)
+    # print(B2B3)
+    thisblock = T[B2B3, B2B3]
+    ###################################################################
+    # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
+    ###################################################################
+    Vh_W, Vh_YH, _ = rand_range_row_jit(thisblock, Gwork[bj:, :])
+    T = index_update(T, index[:, B2B3],
+                     qr.B_times_Q_WY(T[:, B2B3], Vh_W, Vh_YH))
+
+    V = index_update(V, index[:, B2B3],
+                     qr.B_times_Q_WY(V[:, B2B3], Vh_W, Vh_YH))
+
+    # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
+    Uh_W, Uh_YH, Uh_R = qr.house_qr(T[B2B3, J2], mode="WY")
+    U = index_update(U, index[:, B2B3],
+                     qr.B_times_Q_WY(U[:, B2B3], Uh_W, Uh_YH))
+    T = index_update(T, index[B2B3, B3],
+                     qr.Qdag_WY_times_B(T[B2B3, B3], Uh_W, Uh_YH))
+    T = index_update(T, index[B3, J2], 0.)
+    ###################################################################
+    # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
+    ###################################################################
+
+    Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:(b-1), :(b-1)])
+    Vs = dag(Vsh)
+    T = index_update(T, index[I2, J2], jnp.diag(Ds))
+    T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
+    U = index_update(U, index[:, I2], U[:, I2]@Us)
+    T = cond(bj > 0,
+             T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
+             T, lambda x: x)
+
+    # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+    V = index_update(V, index[:, J2], V[:, J2]@Vs)
+    UTV = U@T@dag(V)
+    print(UTV)
+    return [U, T, V]
+
+
+def __randUTV_final(bj, B1, B2B3, U, T, V):
+    print("final")
+    thisblock = T[B2B3, B2B3]
+    Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
+    Vs = dag(Vsh)
+
+    U = index_update(U, index[:, B2B3], U[:, B2B3]@Us)
+    V = index_update(V, index[:, B2B3], V[:, B2B3]@Vs)
+
+    idxs = matutils.subblock_main_diagonal(T, bi=bj)
+    allDs = jnp.zeros(idxs[0].size)
+    allDs = index_update(allDs, index[:Dvals.size], Dvals)
+    T = index_update(T, index[B2B3, B2B3], 0.)
+    T = index_update(T, idxs, allDs)
+    T = cond(bj > 0,
+             T, lambda x: index_update(x, index[B1, B2B3], x[B1, B2B3]@Vs),
+             T, lambda x: x)
+    #T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+    return [U, T, V]
+
+#@jax.jit
+def __randUTV_work(A, Gwork, q=1, p=0):
     """
     Performs the "optimized" randUTV in Figure4 of the paper.
 
     Arguments
     ---------
     A: (m x n) matrix to be factorized.
+    Gwork: (m x b) matrix that will be used as a work space for the
+           randomized range finder.
     b (int): block size
     q (int): Number of power iterations, a hyperparameter.
     p (int): Amount of oversampling, a hyperparameter. Currently does nothing.
     householder:If True, exploit the Householder structure of the QR
         decompositions to speed up the transformation.
     """
-    m, n = matutils.matshape(A)
-    if b is None:
-        b = n
+
+    m, n = A.shape
 
     # Initialize output variables:
     T = A
     U = jnp.eye(m, dtype=A.dtype)
     V = jnp.eye(n, dtype=A.dtype)
-    for i in range(min(math.ceil(m/b), math.ceil(n/b))):
-        # TODO: halting criterion.
-        # Get array indexes ready.
-        bi = b*i
-        I2end = min(b*(i+1), m)
-        J2end = min(b*(i+1), n)
-        thisblock = T[bi:, bi:]
 
-        if (I2end < m and J2end < n):  # I3 and J3 are both nonempty.
-
-            ###################################################################
-            # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
-            ###################################################################
-            Vh_W, Vh_YH, _ = rand_range_row(thisblock, b=b, n_iter=q,
-                                            mode="WY")
-            T = index_update(T, index[:, bi:],
-                             qr.B_times_Q_WY(T[:, bi:], Vh_W, Vh_YH))
-
-            V = index_update(V, index[:, bi:],
-                             qr.B_times_Q_WY(V[:, bi:], Vh_W, Vh_YH))
-
-            # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
-            Uh_W, Uh_YH, Uh_R = qr.house_qr(T[bi:, bi:J2end], mode="WY")
-            U = index_update(U, index[:, bi:],
-                             qr.B_times_Q_WY(U[:, bi:], Uh_W, Uh_YH))
-            # B_times_Q_WY replaces jnp.dot(U[:, bi:], UH))
-            T = index_update(T, index[bi:, J2end:],
-                             qr.Qdag_WY_times_B(T[bi:, J2end:], Uh_W, Uh_YH))
-            ###################################################################
-            # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
-            ###################################################################
-
-            T = index_update(T, index[I2end:, bi:], 0.)
-
-            Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
-            Vs = dag(Vsh)
-            T = index_update(T, index[bi:I2end, bi:J2end], jnp.diag(Ds))
-            T = index_update(T, index[bi:I2end, J2end:], jnp.dot(dag(Us),
-                             T[bi:I2end, J2end:]))
-            U = index_update(U, index[:, bi:I2end], jnp.dot(U[:, bi:I2end],
-                             Us))
-            T = index_update(T, index[:bi, bi:J2end],
-                             jnp.dot(T[:bi, bi:J2end], Vs))
-            V = index_update(V, index[:, bi:J2end], jnp.dot(V[:, bi:J2end],
-                             Vs))
-
-        else:  # One of I3 and J3 are empty, so this is the final block.
-            Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
-            Vs = dag(Vsh)
-
-            U = index_update(U, index[:, bi:], jnp.dot(U[:, bi:], Us))
-            V = index_update(V, index[:, bi:], jnp.dot(V[:, bi:], Vs))
-
-            idxs = matutils.subblock_main_diagonal(T, bi=bi)
-            allDs = jnp.zeros(idxs[0].size)
-            allDs = index_update(allDs, index[:Dvals.size], Dvals)
-            T = index_update(T, index[bi:, bi:], 0.)
-            T = index_update(T, idxs, allDs)
-            T = index_update(T, index[:bi, bi:],
-                             jnp.dot(T[:bi, bi:], Vs))
-
-    output = [U, T, V]
-    return output
+    b = Gwork.shape[1]
+    for bj in range(0, min(m, n), b):
+        j = bj//b
+        m, n = T.shape
+        I2end = b*(j+1)-1
+        J2end = b*(j+1)-1
+        B1 = index[:(bj-1)]
+        I2 = index[bj:I2end]
+        J2 = index[bj:J2end]
+        B3 = index[b*(j+1):]
+        B2B3 = index[bj:]
+        block_func = partial(__randUTV_block, bj, b, B1, I2, J2, B3, B2B3,
+                             Gwork)
+        final_func = partial(__randUTV_final, bj, B1, B2B3)
+        if bj + b < m - 1 and bj + b < n - 1:
+            U, T, V = block_func(U, T, V)
+        else:
+            U, T, V = final_func(U, T, V)
+        # UTV = cond(
+                    # (bj + b < m) and (bj + b < n),
+                    # [U, T, V], lambda x: block_func(*x),
+                    # [U, T, V], lambda x: final_func(*x)
+                  # )
+    return [U, T, V]

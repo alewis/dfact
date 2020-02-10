@@ -96,12 +96,58 @@ def gaussian_random_complex64(key=None, shape=()):
     The real and imaginary parts are separately generated.
     If key is unspecified, a key is generated from system time.
     """
-    if key is None:
-        key = jax.random.PRNGKey(int(time.time()))
+    #if key is None:
+    key = jax.random.PRNGKey(int(time.time()))
     subkey1, subkey2 = jax.random.split(key, 2)
     realpart = jax.random.normal(subkey1, shape=shape, dtype=jnp.float32)
     imagpart = jax.random.normal(subkey2, shape=shape, dtype=jnp.float32)
     output = realpart + 1.0j * imagpart
+    return output
+
+
+@jax.jit
+def gaussian_random_complex_arr(arglist):
+    """
+    Use jax.random to generate a Gaussian random matrix of complex128 type.
+    The real and imaginary parts are separately generated.
+    """
+    key, arr = arglist
+    #if key is None:
+    subkey1, subkey2 = jax.random.split(key, 2)
+    realpart = jax.random.normal(subkey1, shape=arr.shape, dtype=jnp.float32)
+    imagpart = jax.random.normal(subkey2, shape=arr.shape, dtype=jnp.float32)
+    output = realpart + 1.0j * imagpart
+    return output
+
+
+@jax.jit
+def gaussian_random_real_arr(arglist):
+    """
+    Use jax.random to generate a Gaussian random matrix of complex128 type.
+    The real and imaginary parts are separately generated.
+    """
+    key, arr = arglist
+    realpart = jax.random.normal(key, shape=arr.shape, dtype=jnp.float32)
+    output = realpart 
+    return output
+
+
+@jax.jit
+def gaussian_random_fill(work_array):
+    """
+    Return an array of Gaussian complex random number of the same type
+    and shape as work_array.
+    """
+    key = jax.random.PRNGKey(int(time.time()))
+    subkey1, subkey2 = jax.random.split(key, 2)
+
+    output = jax.lax.cond(jnp.iscomplexobj(work_array),
+                          (subkey1, work_array),
+                          lambda x: gaussian_random_complex_arr(x).astype(
+                                    work_array.dtype),
+                          (subkey2, work_array),
+                          lambda x: gaussian_random_real_arr(x).astype(
+                                    work_array.dtype))
     return output
 
 
