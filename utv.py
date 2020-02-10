@@ -465,18 +465,39 @@ def randUTV(A, b, q=2, p=0):
 #      #  print("UTV:\n ", U@T@dag(V))
 #      return [U, T, V]
 
-def divvy_blocks(bj, b, m, n):
+def divvy_blocks(bj, T, b):
     """
     This computes the active blocks for each loop of randUTV.
     """
     B1 = index[:bj]
-    I2end = min(bj+b, m)
-    J2end = min(bj+b, n)
+    I2end = jnp.min([bj+b, T.shape[0]])
+    J2end = jnp.min([bj+b, T.shape[1]])
     I2 = index[bj:I2end]
     J2 = index[bj:J2end]
     B3 = index[bj+b:]
     B2B3 = index[bj:]
     return [B1, I2, J2, B3, B2B3]
+
+
+@partial(jax.jit, static_argnums=(1,))
+def initialize_slices(T, b):
+    B1s = []
+    B2s = []
+    B3s = []
+    B2B3s = []
+    bj0 = 0
+    mindim = jnp.min(T.shape)
+
+    for bj in range(0, mindim-b, b):
+        bj0 = bj
+        B1s.append(index[:bj])
+        B2s.append(index[bj:bj+b])
+        B3s.append(index[bj+b:])
+        B2B3s.append(index[bj:])
+    for bj in range(bj0+b, mindim, b):
+        B1s.append(index[:bj])
+        B2B3s.append(index[bj:])
+    return [B1s, B2s, B3s, B2B3s]
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3))
@@ -502,17 +523,19 @@ def __randUTV_work(A, b, q, p):
     T = A
     V = jnp.eye(n, dtype=A.dtype)
 
-    m, n = T.shape
-    persistent_counter = 0  # Passes final value of bj to the next for loop.
-    for bj in range(0, min(m, n)-b, b):
+    B1s, B2s, B3s, B2B3s = initialize_slices(T, b)
+    mindim = jnp.min(T.shape)
+    bj0 = 0  # Passes final value to next for loop.
+    for bj in range(0, mindim-b, b):
+        bj0 = bj
         # During this for loop, we create and apply transformation matrices
         # bringing the j'th b x b diagonal block of T to diagonal form.
         # The loop terminates when the next diagonal block would either be
         # empty or smaller than b x b, in which case we execute the code
         # within the next for loop. We use a pair of for loops to avoid
         # the awkward interplay between conditionals and jit.
-        persistent_counter = bj
-        B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
+        j = bj//b
+        B1, B2, B3, B2B3 = [B1s[j], B2s[j], B3s[j], B2B3s[j]]
         thisblock = T[B2B3, B2B3]
 
         # Use randomized sampling methods to generate a unitary matrix Vj
@@ -539,13 +562,13 @@ def __randUTV_work(A, b, q, p):
         # procedure, while U remains unitary. Uj is also in its WY
         # representation. This time, we hang onto the matrix R in the QR
         # decomposition for later use.
-        Uj_W, Uj_YH, Uj_R = qr.house_qr(T[B2B3, J2], mode="WY")
+        Uj_W, Uj_YH, Uj_R = qr.house_qr(T[B2B3, B2], mode="WY")
         U = index_update(U, index[:, B2B3],
                          qr.B_times_Q_WY(U[:, B2B3], Uj_W, Uj_YH))
         T = index_update(T, index[B2B3, B3],
                          qr.Qdag_WY_times_B(T[B2B3, B3], Uj_W, Uj_YH))
         # Zero out entries of T beneath the current block diagonal.
-        T = index_update(T, index[B3, J2], 0.)
+        T = index_update(T, index[B3, B2], 0.)
 
         # Uj_R[:b, :b] is now the portion of the active diagonal block which
         # we have not yet absorbed into U, T, or V. Diagonalize it with
@@ -555,20 +578,21 @@ def __randUTV_work(A, b, q, p):
         # transformation is reversed during A = U @ T @ dag(V).
         Us, Ds, Vsh = jnp.linalg.svd(Uj_R[:b, :b])
         Vs = dag(Vsh)
-        T = index_update(T, index[I2, J2], jnp.diag(Ds))
-        T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
-        U = index_update(U, index[:, I2], U[:, I2]@Us)
-        T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
-        V = index_update(V, index[:, J2], V[:, J2]@Vs)
+        T = index_update(T, index[B2, B2], jnp.diag(Ds))
+        T = index_update(T, index[B2, B3], dag(Us)@T[B2, B3])
+        U = index_update(U, index[:, B2], U[:, B2]@Us)
+        T = index_update(T, index[B1, B2], T[B1, B2]@Vs)
+        V = index_update(V, index[:, B2], V[:, B2]@Vs)
 
-    for bj in range(persistent_counter, min(m, n), b):
+    for bj in range(bj0+b, mindim, b):
         # This 'loop' operates on the last diagonal block in the case that
         # b did not divide either m or n evenly. It performs the SVD
         # step at the end of the 'main' block, accomodating the relevant
         # matrix dimensions. This loop should only ever increment either
         # never or once and
         # would more naturally be an if statement, but Jit doesn't like that.
-        B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
+        B1 = B1s[-1]
+        B2B3 = B2B3s[-1]
         thisblock = T[B2B3, B2B3]
 
         Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)

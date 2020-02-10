@@ -128,7 +128,7 @@ def gaussian_random_real_arr(arglist):
     """
     key, arr = arglist
     realpart = jax.random.normal(key, shape=arr.shape, dtype=jnp.float32)
-    output = realpart 
+    output = realpart
     return output
 
 
