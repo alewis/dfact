@@ -650,7 +650,7 @@ class TestUTV(GaussianMatrixTest):
             m, n, dtype = paramtup
             for b in range(1, n+1, 1):
                 with self.subTest(b=b):
-                    U, T, V = utv.randUTV(A, b=b, q=1)
+                    U, T, V = utv.randUTV(A, b=b, q=2, p=5)
                     A_UTV = matutils.trimultmat(U, T, dag(V))
                     error, errormsg = errstring(A, "A", A_UTV,
                                                 "UTV A")

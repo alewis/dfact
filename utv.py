@@ -157,33 +157,26 @@ def rand_range_row(A, b=None, n_iter=1, mode="reduced"):
     return Qout
 
 
-N_ITER = 4
-@jax.jit
-def rand_range_row_jit(A, G, q=2):
+@partial(jax.jit, static_argnums=(1, 2, 3))
+def rand_range_row_jit(A, b, q, p):
     """
     Jit implementation of
     randomized range finding. Starting from a general (m x n) matrix
     A, a (n x b) with b<=m matrix, Q, is sought such that
     ||I - Q Q^dag A|| is minimized.
 
-    It is fairly straightforward to modify this algorithm so that k is
-    instead chosen dynamically in such a way that the error function is
-    bound by some chosen epsilon. I haven't done this because the code is
-    slightly more complicated (the QR algorithm must be written out and
-    slightly modified).
-
-    If full=False:
-        This function returns a (n x b) matrix.
-
-    If full=True:
-        This function returns a (n x n) matrix.
+    Q is returned in the "WY" form; that is, as matrices W and dag(Y) such that
+    Q = I - W dag(Y).
 
     Arguments
     ---------
     A (array): The m x n matrix to be factorized.
     G (array): An m x b array that will be overwritten with random
                numbers.
-    n_iter (int)   : Number of power iterations
+    q (int)  : Number of power iterations
+    p (int)  : Degree of oversampling.
+
+    q and p are treated by Jit as static arguments.
 
     Returns
     -------
@@ -201,26 +194,24 @@ def rand_range_row_jit(A, G, q=2):
     m, n = A.shape
     # assert n_iter >= 0
     # G = jnp.random.randn(m, b)  # The Gaussian random subspace.
+    G = jnp.zeros((m, b+p), dtype=A.dtype)
     G = index_update(G, index[:], matutils.gaussian_random_fill(G))
     G0, _ = qr.house_qr(G, mode="reduced")
-    
-    #Y = dag(A) @ G  # (n x b) projection of A onto that subspace.
+
     Y = dag(A) @ G0
     Y0, _ = qr.house_qr(Y, mode="reduced")
 
-    # if n_iter > 0:
-    # Power iterations speed the decay of Y's singular values.
-    # TODO How can we loop a dynamical number of times??
+    # Power iterations speed the decay of Y's singular values. This improves
+    # the approximation, which is worse for smaller SVs.
     AdagA = dag(A) @ A
     AdagA0 = qr.house_qr(AdagA, mode="reduced")
-    #for _ in range(q):
-    for _ in range(N_ITER):
+    for _ in range(q):
         out_tup = qr.house_qr(AdagA@Y0, mode="reduced")
         Y0 = index_update(Y0, index[:], out_tup[0])
 
-    Qout = qr.house_qr(Y0, mode="WY")
+    Qout = qr.house_qr(Y0[:, :b], mode="WY")
     # Now Q is unitary with the same column space as Y.
-    return Qout 
+    return Qout
 
 
 
@@ -374,7 +365,7 @@ def stepUTV_slow(A, b=None, p=5, n_iter=1, verbose=False):
     return output
 
 
-def randUTV(A, b, q=1, p=0):
+def randUTV(A, b, q=2, p=0):
     """
     Performs the "optimized" randUTV in Figure4 of the paper.
 
@@ -389,8 +380,7 @@ def randUTV(A, b, q=1, p=0):
     householder:If True, exploit the Householder structure of the QR
         decompositions to speed up the transformation.
     """
-    Gwork = jnp.zeros((A.shape[0], b), dtype=A.dtype)
-    U, T, V = __randUTV_work(A, Gwork, q=q, p=p)
+    U, T, V = __randUTV_work(A, b, q, p)
     return [U, T, V]
 
 
@@ -476,6 +466,9 @@ def randUTV(A, b, q=1, p=0):
 #      return [U, T, V]
 
 def divvy_blocks(bj, b, m, n):
+    """
+    This computes the active blocks for each loop of randUTV.
+    """
     B1 = index[:bj]
     I2end = min(bj+b, m)
     J2end = min(bj+b, n)
@@ -485,7 +478,9 @@ def divvy_blocks(bj, b, m, n):
     B2B3 = index[bj:]
     return [B1, I2, J2, B3, B2B3]
 
-def __randUTV_work(A, Gwork, q=1, p=0):
+
+@partial(jax.jit, static_argnums=(1, 2, 3))
+def __randUTV_work(A, b, q, p):
 
     """
     Performs the "optimized" randUTV in Figure4 of the paper.
@@ -497,65 +492,82 @@ def __randUTV_work(A, Gwork, q=1, p=0):
            randomized range finder.
     b (int): block size
     q (int): Number of power iterations, a hyperparameter.
-             This presently does nothing, since I can't figure out how to 
-             get JITted code to loop q times.
-    p (int): Amount of oversampling, a hyperparameter. Currently does nothing.
-    householder:If True, exploit the Householder structure of the QR
-        decompositions to speed up the transformation.
+    p (int): Amount of oversampling, a hyperparameter. 
     """
 
     m, n = A.shape
 
     # Initialize output variables:
-    T = A
     U = jnp.eye(m, dtype=A.dtype)
+    T = A
     V = jnp.eye(n, dtype=A.dtype)
 
-    b = Gwork.shape[1]
     m, n = T.shape
-
-    persistent_counter = 0
+    persistent_counter = 0  # Passes final value of bj to the next for loop.
     for bj in range(0, min(m, n)-b, b):
+        # During this for loop, we create and apply transformation matrices
+        # bringing the j'th b x b diagonal block of T to diagonal form.
+        # The loop terminates when the next diagonal block would either be
+        # empty or smaller than b x b, in which case we execute the code
+        # within the next for loop. We use a pair of for loops to avoid
+        # the awkward interplay between conditionals and jit.
         persistent_counter = bj
         B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
-        # j = bj//b
-        #if bj + b < m and bj + b < n:
         thisblock = T[B2B3, B2B3]
-        ###################################################################
-        # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
-        ###################################################################
-        Vh_W, Vh_YH, _ = rand_range_row_jit(thisblock, Gwork[bj:, :])
+
+        # Use randomized sampling methods to generate a unitary matrix Vj
+        # whose columns form an approximate orthonormal basis for those of
+        # T([I2, J3], [J2, J3]); that is, the portion of A which is not
+        # yet diagonal-ish. Vj is in its WY QR representation,
+        # that is, as two matrices Vj_W and Vj_YH.
+        Vj_W, Vj_YH, _ = rand_range_row_jit(thisblock, b, q, p)
+
+        # Compute T = T @ Vj and V = V @ Vj using the function
+        # qr.B_times_Q_WY, which does B @ Q with Q in the WY representation.
+        # Since V is initially the identity, this builds up
+        # V=V0@V0s@V1@V0s@V2... ,
+        # so that V inherits the unitarity of its constituents. T@dag(V)
+        # then reverses the procedure. V0s, which is also unitary,  is computed
+        # in the final step of the for loop.
         T = index_update(T, index[:, B2B3],
-                         qr.B_times_Q_WY(T[:, B2B3], Vh_W, Vh_YH))
-
+                         qr.B_times_Q_WY(T[:, B2B3], Vj_W, Vj_YH))
         V = index_update(V, index[:, B2B3],
-                         qr.B_times_Q_WY(V[:, B2B3], Vh_W, Vh_YH))
+                         qr.B_times_Q_WY(V[:, B2B3], Vj_W, Vj_YH))
 
-        # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
-        Uh_W, Uh_YH, Uh_R = qr.house_qr(T[B2B3, J2], mode="WY")
+        # Build an orthonormal/unitary matrix Uj in similar fashion, and
+        # compute U = U@Uj, T = dag(Uj)@T. Thus, U @ T again reverses the
+        # procedure, while U remains unitary. Uj is also in its WY
+        # representation. This time, we hang onto the matrix R in the QR
+        # decomposition for later use.
+        Uj_W, Uj_YH, Uj_R = qr.house_qr(T[B2B3, J2], mode="WY")
         U = index_update(U, index[:, B2B3],
-                         qr.B_times_Q_WY(U[:, B2B3], Uh_W, Uh_YH))
+                         qr.B_times_Q_WY(U[:, B2B3], Uj_W, Uj_YH))
         T = index_update(T, index[B2B3, B3],
-                         qr.Qdag_WY_times_B(T[B2B3, B3], Uh_W, Uh_YH))
+                         qr.Qdag_WY_times_B(T[B2B3, B3], Uj_W, Uj_YH))
+        # Zero out entries of T beneath the current block diagonal.
         T = index_update(T, index[B3, J2], 0.)
-        ###################################################################
-        # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
-        ###################################################################
 
-        Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
+        # Uj_R[:b, :b] is now the portion of the active diagonal block which
+        # we have not yet absorbed into U, T, or V. Diagonalize it with
+        # an SVD to yield 'small' matrices Us@Ds@Vsh = svd(Uj_R[:b, :b].
+        # T[I2, J2] = Ds thus diagonalizes the active block. Absorb
+        # the unitary matrices Us and Vsh into U, T, and V so that the
+        # transformation is reversed during A = U @ T @ dag(V).
+        Us, Ds, Vsh = jnp.linalg.svd(Uj_R[:b, :b])
         Vs = dag(Vsh)
         T = index_update(T, index[I2, J2], jnp.diag(Ds))
         T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
         U = index_update(U, index[:, I2], U[:, I2]@Us)
         T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
-        #  T = cond(bj > 0,
-        #           T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
-        #           T, lambda x: x)
-
-        # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
         V = index_update(V, index[:, J2], V[:, J2]@Vs)
 
     for bj in range(persistent_counter, min(m, n), b):
+        # This 'loop' operates on the last diagonal block in the case that
+        # b did not divide either m or n evenly. It performs the SVD
+        # step at the end of the 'main' block, accomodating the relevant
+        # matrix dimensions. This loop should only ever increment either
+        # never or once and
+        # would more naturally be an if statement, but Jit doesn't like that.
         B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
         thisblock = T[B2B3, B2B3]
 
@@ -571,9 +583,10 @@ def __randUTV_work(A, Gwork, q=1, p=0):
         T = index_update(T, index[B2B3, B2B3], 0.)
         T = index_update(T, idxs, allDs)
         T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
-
-        #  if bj + b < m and bj + b < n :
-        #      U, T, V = block_func(U, T, V)
-        #  else:
-        #      U, T, V = final_func(U, T, V)
     return [U, T, V]
+
+
+
+
+
+

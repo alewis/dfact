@@ -135,8 +135,7 @@ def gaussian_random_real_arr(arglist):
 @jax.jit
 def gaussian_random_fill(work_array):
     """
-    Return an array of Gaussian complex random number of the same type
-    and shape as work_array.
+    Fill work_array with random values in place.
     """
     key = jax.random.PRNGKey(int(time.time()))
     subkey1, subkey2 = jax.random.split(key, 2)
@@ -148,7 +147,8 @@ def gaussian_random_fill(work_array):
                           (subkey2, work_array),
                           lambda x: gaussian_random_real_arr(x).astype(
                                     work_array.dtype))
-    return output
+    work_array = jax.ops.index_update(work_array, index[:], output)
+    return work_array
 
 
 def gaussian_random(key=None, shape=(), dtype=jnp.float32):
