@@ -157,6 +157,7 @@ def rand_range_row(A, b=None, n_iter=1, mode="reduced"):
     return Qout
 
 
+N_ITER = 4
 @jax.jit
 def rand_range_row_jit(A, G, q=2):
     """
@@ -201,19 +202,25 @@ def rand_range_row_jit(A, G, q=2):
     # assert n_iter >= 0
     # G = jnp.random.randn(m, b)  # The Gaussian random subspace.
     G = index_update(G, index[:], matutils.gaussian_random_fill(G))
-    Y = dag(A) @ G  # (n x b) projection of A onto that subspace.
+    G0, _ = qr.house_qr(G, mode="reduced")
+    
+    #Y = dag(A) @ G  # (n x b) projection of A onto that subspace.
+    Y = dag(A) @ G0
+    Y0, _ = qr.house_qr(Y, mode="reduced")
 
     # if n_iter > 0:
     # Power iterations speed the decay of Y's singular values.
     # TODO How can we loop a dynamical number of times??
     AdagA = dag(A) @ A
+    AdagA0 = qr.house_qr(AdagA, mode="reduced")
     #for _ in range(q):
-    for _ in range(2):
-        Y = index_update(Y, index[:], AdagA@Y)
+    for _ in range(N_ITER):
+        out_tup = qr.house_qr(AdagA@Y0, mode="reduced")
+        Y0 = index_update(Y0, index[:], out_tup[0])
 
-    Qout = qr.house_qr(Y, mode="WY")
+    Qout = qr.house_qr(Y0, mode="WY")
     # Now Q is unitary with the same column space as Y.
-    return Qout
+    return Qout 
 
 
 
@@ -387,90 +394,99 @@ def randUTV(A, b, q=1, p=0):
     return [U, T, V]
 
 
-def __randUTV_block(bj, b, B1, I2, J2, B3, B2B3, Gwork, U, T, V):
-    #  print("***BLOCK***")
-    #  # TODO: halt at desired accuracy.
-    #  print("GOING IN")
-    #  print("U: \n", U)
-    #  print("T: \n", T)
-    #  print("V: \n", V)
-    #  print("UTV:\n ", U@T@dag(V))
-    thisblock = T[B2B3, B2B3]
-    ###################################################################
-    # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
-    ###################################################################
-    Vh_W, Vh_YH, _ = rand_range_row_jit(thisblock, Gwork[bj:, :])
-    T = index_update(T, index[:, B2B3],
-                     qr.B_times_Q_WY(T[:, B2B3], Vh_W, Vh_YH))
+#  def __randUTV_block(bj, b, B1, I2, J2, B3, B2B3, Gwork, U, T, V):
+#      #  print("***BLOCK***")
+#      #  # TODO: halt at desired accuracy.
+#      #  print("GOING IN")
+#      #  print("U: \n", U)
+#      #  print("T: \n", T)
+#      #  print("V: \n", V)
+#      #  print("UTV:\n ", U@T@dag(V))
+#      thisblock = T[B2B3, B2B3]
+#      ###################################################################
+#      # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
+#      ###################################################################
+#      Vh_W, Vh_YH, _ = rand_range_row_jit(thisblock, Gwork[bj:, :])
+#      T = index_update(T, index[:, B2B3],
+#                       qr.B_times_Q_WY(T[:, B2B3], Vh_W, Vh_YH))
 
-    V = index_update(V, index[:, B2B3],
-                     qr.B_times_Q_WY(V[:, B2B3], Vh_W, Vh_YH))
+#      V = index_update(V, index[:, B2B3],
+#                       qr.B_times_Q_WY(V[:, B2B3], Vh_W, Vh_YH))
 
-    # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
-    Uh_W, Uh_YH, Uh_R = qr.house_qr(T[B2B3, J2], mode="WY")
-    U = index_update(U, index[:, B2B3],
-                     qr.B_times_Q_WY(U[:, B2B3], Uh_W, Uh_YH))
-    T = index_update(T, index[B2B3, B3],
-                     qr.Qdag_WY_times_B(T[B2B3, B3], Uh_W, Uh_YH))
-    T = index_update(T, index[B3, J2], 0.)
-    ###################################################################
-    # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
-    ###################################################################
+#      # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
+#      Uh_W, Uh_YH, Uh_R = qr.house_qr(T[B2B3, J2], mode="WY")
+#      U = index_update(U, index[:, B2B3],
+#                       qr.B_times_Q_WY(U[:, B2B3], Uh_W, Uh_YH))
+#      T = index_update(T, index[B2B3, B3],
+#                       qr.Qdag_WY_times_B(T[B2B3, B3], Uh_W, Uh_YH))
+#      T = index_update(T, index[B3, J2], 0.)
+#      ###################################################################
+#      # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
+#      ###################################################################
 
-    Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
-    Vs = dag(Vsh)
-    T = index_update(T, index[I2, J2], jnp.diag(Ds))
-    T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
-    U = index_update(U, index[:, I2], U[:, I2]@Us)
-    T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
-    #  T = cond(bj > 0,
-    #           T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
-    #           T, lambda x: x)
+#      Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
+#      Vs = dag(Vsh)
+#      T = index_update(T, index[I2, J2], jnp.diag(Ds))
+#      T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
+#      U = index_update(U, index[:, I2], U[:, I2]@Us)
+#      T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+#      #  T = cond(bj > 0,
+#      #           T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
+#      #           T, lambda x: x)
 
-    # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
-    V = index_update(V, index[:, J2], V[:, J2]@Vs)
-    #  print("GOING OUT")
-    #  print("U: \n", U)
-    #  print("T: \n", T)
-    #  print("V: \n", V)
-    #  print("UTV:\n ", U@T@dag(V))
-    return [U, T, V]
+#      # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+#      V = index_update(V, index[:, J2], V[:, J2]@Vs)
+#      #  print("GOING OUT")
+#      #  print("U: \n", U)
+#      #  print("T: \n", T)
+#      #  print("V: \n", V)
+#      #  print("UTV:\n ", U@T@dag(V))
+#      return [U, T, V]
 
+#  def __randUTV_final(bj, B1, B2B3, U, T, V):
+#      #  print("***FINAL***")
+#      #  print("GOING IN")
+#      #  print("U: \n", U)
+#      #  print("T: \n", T)
+#      #  print("V: \n", V)
+#      #  print("UTV:\n ", U@T@dag(V))
+#      thisblock = T[B2B3, B2B3]
 
-def __randUTV_final(bj, B1, B2B3, U, T, V):
-    #  print("***FINAL***")
-    #  print("GOING IN")
-    #  print("U: \n", U)
-    #  print("T: \n", T)
-    #  print("V: \n", V)
-    #  print("UTV:\n ", U@T@dag(V))
-    thisblock = T[B2B3, B2B3]
+#      Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
+#      Vs = dag(Vsh)
 
-    Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
-    Vs = dag(Vsh)
+#      U = index_update(U, index[:, B2B3], U[:, B2B3]@Us)
+#      V = index_update(V, index[:, B2B3], V[:, B2B3]@Vs)
 
-    U = index_update(U, index[:, B2B3], U[:, B2B3]@Us)
-    V = index_update(V, index[:, B2B3], V[:, B2B3]@Vs)
+#      idxs = matutils.subblock_main_diagonal(T, bi=bj)
+#      allDs = jnp.zeros(idxs[0].size)
+#      allDs = index_update(allDs, index[:Dvals.size], Dvals)
+#      T = index_update(T, index[B2B3, B2B3], 0.)
+#      T = index_update(T, idxs, allDs)
+#      T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+#      #  T = cond(bj > 0,
+#      #           T, lambda x: index_update(x, index[B1, B2B3], x[B1, B2B3]@Vs),
+#      #           T, lambda x: x)
+#      #T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+#      #  print("GOING OUT")
+#      #  print("U: \n", U)
+#      #  print("T: \n", T)
+#      #  print("V: \n", V)
+#      #  print("UTV:\n ", U@T@dag(V))
+#      return [U, T, V]
 
-    idxs = matutils.subblock_main_diagonal(T, bi=bj)
-    allDs = jnp.zeros(idxs[0].size)
-    allDs = index_update(allDs, index[:Dvals.size], Dvals)
-    T = index_update(T, index[B2B3, B2B3], 0.)
-    T = index_update(T, idxs, allDs)
-    T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
-    #  T = cond(bj > 0,
-    #           T, lambda x: index_update(x, index[B1, B2B3], x[B1, B2B3]@Vs),
-    #           T, lambda x: x)
-    #T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
-    #  print("GOING OUT")
-    #  print("U: \n", U)
-    #  print("T: \n", T)
-    #  print("V: \n", V)
-    #  print("UTV:\n ", U@T@dag(V))
-    return [U, T, V]
+def divvy_blocks(bj, b, m, n):
+    B1 = index[:bj]
+    I2end = min(bj+b, m)
+    J2end = min(bj+b, n)
+    I2 = index[bj:I2end]
+    J2 = index[bj:J2end]
+    B3 = index[bj+b:]
+    B2B3 = index[bj:]
+    return [B1, I2, J2, B3, B2B3]
 
-#@jax.jit
 def __randUTV_work(A, Gwork, q=1, p=0):
+
     """
     Performs the "optimized" randUTV in Figure4 of the paper.
 
@@ -481,6 +497,8 @@ def __randUTV_work(A, Gwork, q=1, p=0):
            randomized range finder.
     b (int): block size
     q (int): Number of power iterations, a hyperparameter.
+             This presently does nothing, since I can't figure out how to 
+             get JITted code to loop q times.
     p (int): Amount of oversampling, a hyperparameter. Currently does nothing.
     householder:If True, exploit the Householder structure of the QR
         decompositions to speed up the transformation.
@@ -494,22 +512,68 @@ def __randUTV_work(A, Gwork, q=1, p=0):
     V = jnp.eye(n, dtype=A.dtype)
 
     b = Gwork.shape[1]
-    for bj in range(0, min(m, n), b):
+    m, n = T.shape
+
+    persistent_counter = 0
+    for bj in range(0, min(m, n)-b, b):
+        persistent_counter = bj
+        B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
         # j = bj//b
-        m, n = T.shape
-        I2end = min(bj+b, m)
-        J2end = min(bj+b, n)
-        B1 = index[:bj]
-        I2 = index[bj:I2end]
-        J2 = index[bj:J2end]
-        B3 = index[bj+b:]
-        B2B3 = index[bj:]
-        #print("B1: ", B1, "\n I2:", I2, "\n J2:", J2, "\n B3:", B3, "\n B2B3:", B2B3)
-        block_func = partial(__randUTV_block, bj, b, B1, I2, J2, B3, B2B3,
-                             Gwork)
-        final_func = partial(__randUTV_final, bj, B1, B2B3)
-        if bj + b < m - 1 and bj + b < n - 1:
-            U, T, V = block_func(U, T, V)
-        else:
-            U, T, V = final_func(U, T, V)
+        #if bj + b < m and bj + b < n:
+        thisblock = T[B2B3, B2B3]
+        ###################################################################
+        # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
+        ###################################################################
+        Vh_W, Vh_YH, _ = rand_range_row_jit(thisblock, Gwork[bj:, :])
+        T = index_update(T, index[:, B2B3],
+                         qr.B_times_Q_WY(T[:, B2B3], Vh_W, Vh_YH))
+
+        V = index_update(V, index[:, B2B3],
+                         qr.B_times_Q_WY(V[:, B2B3], Vh_W, Vh_YH))
+
+        # UH, R = jnp.linalg.qr(T[bi:, bi:J2end], mode="complete")
+        Uh_W, Uh_YH, Uh_R = qr.house_qr(T[B2B3, J2], mode="WY")
+        U = index_update(U, index[:, B2B3],
+                         qr.B_times_Q_WY(U[:, B2B3], Uh_W, Uh_YH))
+        T = index_update(T, index[B2B3, B3],
+                         qr.Qdag_WY_times_B(T[B2B3, B3], Uh_W, Uh_YH))
+        T = index_update(T, index[B3, J2], 0.)
+        ###################################################################
+        # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
+        ###################################################################
+
+        Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
+        Vs = dag(Vsh)
+        T = index_update(T, index[I2, J2], jnp.diag(Ds))
+        T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
+        U = index_update(U, index[:, I2], U[:, I2]@Us)
+        T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+        #  T = cond(bj > 0,
+        #           T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
+        #           T, lambda x: x)
+
+        # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+        V = index_update(V, index[:, J2], V[:, J2]@Vs)
+
+    for bj in range(persistent_counter, min(m, n), b):
+        B1, I2, J2, B3, B2B3 = divvy_blocks(bj, b, m, n)
+        thisblock = T[B2B3, B2B3]
+
+        Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
+        Vs = dag(Vsh)
+
+        U = index_update(U, index[:, B2B3], U[:, B2B3]@Us)
+        V = index_update(V, index[:, B2B3], V[:, B2B3]@Vs)
+
+        idxs = matutils.subblock_main_diagonal(T, bi=bj)
+        allDs = jnp.zeros(idxs[0].size)
+        allDs = index_update(allDs, index[:Dvals.size], Dvals)
+        T = index_update(T, index[B2B3, B2B3], 0.)
+        T = index_update(T, idxs, allDs)
+        T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+
+        #  if bj + b < m and bj + b < n :
+        #      U, T, V = block_func(U, T, V)
+        #  else:
+        #      U, T, V = final_func(U, T, V)
     return [U, T, V]
