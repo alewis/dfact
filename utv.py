@@ -384,23 +384,17 @@ def randUTV(A, b, q=1, p=0):
     """
     Gwork = jnp.zeros((A.shape[0], b), dtype=A.dtype)
     U, T, V = __randUTV_work(A, Gwork, q=q, p=p)
-    print("result:", U@T@dag(V))
-    
     return [U, T, V]
 
 
 def __randUTV_block(bj, b, B1, I2, J2, B3, B2B3, Gwork, U, T, V):
-    print("block")
-    # TODO: halt at desired accuracy.
-    # Very strange things happen with Jit if we try to refactor
-    # this code block into a subroutine!
-
-    # Get array indexes ready.
-    # print(B1)
-    # print(I2)
-    # print(J2)
-    # print(B3)
-    # print(B2B3)
+    #  print("***BLOCK***")
+    #  # TODO: halt at desired accuracy.
+    #  print("GOING IN")
+    #  print("U: \n", U)
+    #  print("T: \n", T)
+    #  print("V: \n", V)
+    #  print("UTV:\n ", U@T@dag(V))
     thisblock = T[B2B3, B2B3]
     ###################################################################
     # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE BEGINS HERE
@@ -423,25 +417,35 @@ def __randUTV_block(bj, b, B1, I2, J2, B3, B2B3, Gwork, U, T, V):
     # CODE TO EXPLOIT HOUSEHOLDER STRUCTURE ENDS HERE
     ###################################################################
 
-    Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:(b-1), :(b-1)])
+    Us, Ds, Vsh = jnp.linalg.svd(Uh_R[:b, :b])
     Vs = dag(Vsh)
     T = index_update(T, index[I2, J2], jnp.diag(Ds))
     T = index_update(T, index[I2, B3], dag(Us)@T[I2, B3])
     U = index_update(U, index[:, I2], U[:, I2]@Us)
-    T = cond(bj > 0,
-             T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
-             T, lambda x: x)
+    T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
+    #  T = cond(bj > 0,
+    #           T, lambda x: index_update(x, index[B1, J2], x[B1, J2]@Vs),
+    #           T, lambda x: x)
 
     # T = index_update(T, index[B1, J2], T[B1, J2]@Vs)
     V = index_update(V, index[:, J2], V[:, J2]@Vs)
-    UTV = U@T@dag(V)
-    print(UTV)
+    #  print("GOING OUT")
+    #  print("U: \n", U)
+    #  print("T: \n", T)
+    #  print("V: \n", V)
+    #  print("UTV:\n ", U@T@dag(V))
     return [U, T, V]
 
 
 def __randUTV_final(bj, B1, B2B3, U, T, V):
-    print("final")
+    #  print("***FINAL***")
+    #  print("GOING IN")
+    #  print("U: \n", U)
+    #  print("T: \n", T)
+    #  print("V: \n", V)
+    #  print("UTV:\n ", U@T@dag(V))
     thisblock = T[B2B3, B2B3]
+
     Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
     Vs = dag(Vsh)
 
@@ -453,10 +457,16 @@ def __randUTV_final(bj, B1, B2B3, U, T, V):
     allDs = index_update(allDs, index[:Dvals.size], Dvals)
     T = index_update(T, index[B2B3, B2B3], 0.)
     T = index_update(T, idxs, allDs)
-    T = cond(bj > 0,
-             T, lambda x: index_update(x, index[B1, B2B3], x[B1, B2B3]@Vs),
-             T, lambda x: x)
+    T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+    #  T = cond(bj > 0,
+    #           T, lambda x: index_update(x, index[B1, B2B3], x[B1, B2B3]@Vs),
+    #           T, lambda x: x)
     #T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+    #  print("GOING OUT")
+    #  print("U: \n", U)
+    #  print("T: \n", T)
+    #  print("V: \n", V)
+    #  print("UTV:\n ", U@T@dag(V))
     return [U, T, V]
 
 #@jax.jit
@@ -485,15 +495,16 @@ def __randUTV_work(A, Gwork, q=1, p=0):
 
     b = Gwork.shape[1]
     for bj in range(0, min(m, n), b):
-        j = bj//b
+        # j = bj//b
         m, n = T.shape
-        I2end = b*(j+1)-1
-        J2end = b*(j+1)-1
-        B1 = index[:(bj-1)]
+        I2end = min(bj+b, m)
+        J2end = min(bj+b, n)
+        B1 = index[:bj]
         I2 = index[bj:I2end]
         J2 = index[bj:J2end]
-        B3 = index[b*(j+1):]
+        B3 = index[bj+b:]
         B2B3 = index[bj:]
+        #print("B1: ", B1, "\n I2:", I2, "\n J2:", J2, "\n B3:", B3, "\n B2B3:", B2B3)
         block_func = partial(__randUTV_block, bj, b, B1, I2, J2, B3, B2B3,
                              Gwork)
         final_func = partial(__randUTV_final, bj, B1, B2B3)
@@ -501,9 +512,4 @@ def __randUTV_work(A, Gwork, q=1, p=0):
             U, T, V = block_func(U, T, V)
         else:
             U, T, V = final_func(U, T, V)
-        # UTV = cond(
-                    # (bj + b < m) and (bj + b < n),
-                    # [U, T, V], lambda x: block_func(*x),
-                    # [U, T, V], lambda x: final_func(*x)
-                  # )
     return [U, T, V]
