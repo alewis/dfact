@@ -380,7 +380,7 @@ def randUTV(A, b, q=2, p=0):
     householder:If True, exploit the Householder structure of the QR
         decompositions to speed up the transformation.
     """
-    U, T, V = __randUTV_work(A, b, q, p)
+    U, T, V = __randUTV_workforjit(A, b, q, p)
     return [U, T, V]
 
 
@@ -501,6 +501,155 @@ def initialize_slices(T, b):
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3))
+def __randUTV_block_step1(bj, b, q, p, T, V, thisblock, T_B2B3, V_B2B3):
+    # Use randomized sampling methods to generate a unitary matrix Vj
+    # whose columns form an approximate orthonormal basis for those of
+    # T([I2, J3], [J2, J3]); that is, the portion of A which is not
+    # yet diagonal-ish. Vj is in its WY QR representation,
+    # that is, as two matrices Vj_W and Vj_YH.
+    Vj_W, Vj_YH, _ = rand_range_row_jit(thisblock, b, q, p)
+
+    # Compute T = T @ Vj and V = V @ Vj using the function
+    # qr.B_times_Q_WY, which does B @ Q with Q in the WY representation.
+    # Since V is initially the identity, this builds up
+    # V=V0@V0s@V1@V0s@V2... ,
+    # so that V inherits the unitarity of its constituents. T@dag(V)
+    # then reverses the procedure. V0s, which is also unitary,  is computed
+    # in the final step of the for loop.
+    Tupdate = qr.B_times_Q_WY(T_B2B3, Vj_W, Vj_YH)
+    T = index_update(T, index[:], 
+                     jax.lax.dynamic_update_slice(T, Tupdate, [0, bj]))
+    Vupdate = qr.B_times_Q_WY(V_B2B3, Vj_W, Vj_YH)
+    V = index_update(V, index[:], 
+                     jax.lax.dynamic_update_slice(V, Vupdate, [0, bj]))
+    return T, V
+
+@partial(jax.jit, static_argnums=(1,))
+def __randUTV_block_step2(bj, b, U, T, V,
+        T_B2B3_B2, U_B2B3, T_B2B3_B3, T_B3_B2, Tzeros):
+    # Build an orthonormal/unitary matrix Uj in similar fashion, and
+    # compute U = U@Uj, T = dag(Uj)@T. Thus, U @ T again reverses the
+    # procedure, while U remains unitary. Uj is also in its WY
+    # representation. This time, we hang onto the matrix R in the QR
+    # decomposition for later use.
+    Uj_W, Uj_YH, Uj_R = qr.house_qr(T_B2B3_B2, mode="WY")
+    Uupdate = qr.B_times_Q_WY(U_B2B3, Uj_W, Uj_YH)
+    U = index_update(U, index[:], 
+                     jax.lax.dynamic_update_slice(U, Uupdate, [0, bj]))
+    Tupdate2 = qr.Qdag_WY_times_B(T_B2B3_B3, Uj_W, Uj_YH)
+    T = index_update(T, index[:], 
+                     jax.lax.dynamic_update_slice(T, Tupdate2, [bj, bj+b]))
+    T = index_update(T, index[:], 
+                     jax.lax.dynamic_update_slice(T, Tzeros, [bj+b, bj]))
+    # Uj_R[:b, :b] is now the portion of the active diagonal block which
+    # we have not yet absorbed into U, T, or V. Diagonalize it with
+    # an SVD to yield 'small' matrices Us@Ds@Vsh = svd(Uj_R[:b, :b].
+    # T[I2, J2] = Ds thus diagonalizes the active block. Absorb
+    # the unitary matrices Us and Vsh into U, T, and V so that the
+    # transformation is reversed during A = U @ T @ dag(V).
+    Us, Ds, Vsh = jnp.linalg.svd(Uj_R[:b, :b])
+    Vs = dag(Vsh)
+    T = index_update(T, index[:], 
+                     jax.lax.dynamic_update_slice(T, jnp.diag(Ds), [bj, bj]))
+    return [Us, Vs, U, T, V]
+
+
+@partial(jax.jit, static_argnums=(1,))
+def __randUTV_block_step3(bj, b, Us, Vs, U, T, V, T_B2_B2, T_B2_B3, U_B2, T_B1_B2, V_B2):
+    T = index_update(T, index[:], 
+                     jax.lax.dynamic_update_slice(T, dag(Us)@T_B2_B3, [bj, bj+b]))
+    U = index_update(U, index[:],
+                     jax.lax.dynamic_update_slice(U, U_B2@Us, [0, bj]))
+    T = index_update(T, index[:],
+                     jax.lax.dynamic_update_slice(T, T_B1_B2@Vs, [0, bj]))
+    V = index_update(V, index[:],
+                     jax.lax.dynamic_update_slice(V, V_B2@Vs, [0, bj]))
+    return U, T, V
+
+
+def __randUTV_workforjit(A, b, q, p):
+
+    """
+    Performs the "optimized" randUTV in Figure4 of the paper.
+
+    Arguments
+    ---------
+    A: (m x n) matrix to be factorized.
+    Gwork: (m x b) matrix that will be used as a work space for the
+           randomized range finder.
+    b (int): block size
+    q (int): Number of power iterations, a hyperparameter.
+    p (int): Amount of oversampling, a hyperparameter. 
+    """
+
+    m, n = A.shape
+
+    # Initialize output variables:
+    U = jnp.eye(m, dtype=A.dtype)
+    T = A
+    V = jnp.eye(n, dtype=A.dtype)
+
+    B1s, B2s, B3s, B2B3s = initialize_slices(T, b)
+    mindim = jnp.min(T.shape)
+    bj0 = 0  # Passes final value to next for loop.
+    for bj in range(0, mindim-b, b):
+        bj0 = bj
+        # During this for loop, we create and apply transformation matrices
+        # bringing the j'th b x b diagonal block of T to diagonal form.
+        # The loop terminates when the next diagonal block would either be
+        # empty or smaller than b x b, in which case we execute the code
+        # within the next for loop. We use a pair of for loops to avoid
+        # the awkward interplay between conditionals and jit.
+        j = bj//b
+        B1, B2, B3, B2B3 = [B1s[j], B2s[j], B3s[j], B2B3s[j]]
+
+        thisblock = T[B2B3, B2B3]
+
+        T_B2B3 = T[:, B2B3]
+        V_B2B3 = V[:, B2B3]
+        T, V = __randUTV_block_step1(bj, b, q, p, T, V, thisblock, T_B2B3, V_B2B3)
+
+        T_B2B3_B2 = T[B2B3, B2]
+        U_B2B3 = U[:, B2B3]
+        T_B2B3_B3 = T[B2B3, B3]
+        T_B3_B2 = T[B3, B2]
+        Tzeros = jnp.zeros(T[B3, B2].shape, dtype=A.dtype)
+        Us, Vs, U, T, V = __randUTV_block_step2(bj, b, U, T, V, T_B2B3_B2, U_B2B3, 
+                                                T_B2B3_B3, T_B3_B2, Tzeros)
+        T_B2_B2 = T[B2, B2]
+        T_B2_B3 = T[B2, B3]
+        U_B2 = U[:, B2]
+        T_B1_B2 = T[B1, B2]
+        V_B2 = V[:, B2]
+        U, T, V = __randUTV_block_step3(bj, b, Us, Vs, U, T, V, T_B2_B2, T_B2_B3, U_B2, T_B1_B2,
+                                        V_B2)
+
+
+    for bj in range(bj0+b, mindim, b):
+        # This 'loop' operates on the last diagonal block in the case that
+        # b did not divide either m or n evenly. It performs the SVD
+        # step at the end of the 'main' block, accomodating the relevant
+        # matrix dimensions. This loop should only ever increment either
+        # never or once and
+        # would more naturally be an if statement, but Jit doesn't like that.
+        B1 = B1s[-1]
+        B2B3 = B2B3s[-1]
+        thisblock = T[B2B3, B2B3]
+
+        Us, Dvals, Vsh = jnp.linalg.svd(thisblock, full_matrices=True)
+        Vs = dag(Vsh)
+
+        U = index_update(U, index[:, B2B3], U[:, B2B3]@Us)
+        V = index_update(V, index[:, B2B3], V[:, B2B3]@Vs)
+
+        idxs = matutils.subblock_main_diagonal(T, bi=bj)
+        allDs = jnp.zeros(idxs[0].size)
+        allDs = index_update(allDs, index[:Dvals.size], Dvals)
+        T = index_update(T, index[B2B3, B2B3], 0.)
+        T = index_update(T, idxs, allDs)
+        T = index_update(T, index[B1, B2B3], T[B1, B2B3]@Vs)
+    return [U, T, V]
+
 def __randUTV_work(A, b, q, p):
 
     """
@@ -536,6 +685,7 @@ def __randUTV_work(A, b, q, p):
         # the awkward interplay between conditionals and jit.
         j = bj//b
         B1, B2, B3, B2B3 = [B1s[j], B2s[j], B3s[j], B2B3s[j]]
+
         thisblock = T[B2B3, B2B3]
 
         # Use randomized sampling methods to generate a unitary matrix Vj

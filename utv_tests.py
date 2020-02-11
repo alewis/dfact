@@ -609,9 +609,9 @@ class TestUTV(GaussianMatrixTest):
         super().__init__(*args, **kwargs)
 
     def setUp(self):
-        ns = (1, 6, 1)
-        ms = (1, 6, 1)
-        dtypes = [jnp.float32, jnp.complex64]
+        ns = (3, 4, 1)
+        ms = (3, 4, 1)
+        dtypes = [jnp.float32]#, jnp.complex64]
         self.ns = range(*ns)
         self.ms = range(*ms)
         self.dtypes = dtypes
@@ -649,7 +649,7 @@ class TestUTV(GaussianMatrixTest):
         def impl(A, paramtup):
             m, n, dtype = paramtup
             #for b in range(1, n+1, 1):
-            for b in range(1, 2, 1):
+            for b in range(1, n+1, 1):
                 with self.subTest(b=b):
                     U, T, V = utv.randUTV(A, b=b, q=2, p=5)
                     A_UTV = matutils.trimultmat(U, T, dag(V))
