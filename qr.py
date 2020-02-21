@@ -10,14 +10,15 @@ import jax
 from jax.ops import index_update, index_add, index
 import jax.numpy as jnp
 import numpy as np
-import matutils
-from matutils import dag
+
+import dfact.matutils
+from dfact.matutils import dag
 
 ###############################################################################
 # UTILITIES
 ###############################################################################
 @jax.jit
-def sign(x):
+def sign(number):
     """
     Sign function using the standard (?) convention sign(x) = x / |x| in
     the complex case. Returns 0 with the same type as x if x == 0.

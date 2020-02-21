@@ -18,10 +18,10 @@ import numpy as np
 import math
 from functools import partial
 
-import matutils
-from matutils import dag
+import dfact.matutils as matutils
+from dfact.matutils import dag
 
-import qr
+import dfact.qr as qr
 
 
 def svd_truncation(A, b=None):

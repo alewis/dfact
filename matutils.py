@@ -1,9 +1,9 @@
 """ Utility functions for testing matrix stuff.
 """
+import time
 import jax
 import jax.numpy as jnp
 from jax.ops import index, index_update
-import time
 
 
 @jax.jit

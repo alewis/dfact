@@ -41,10 +41,10 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 import unittest
-import utv
-import qr
-import matutils
-from matutils import dag
+import dfact.utv
+import dfact.qr
+import dfact.matutils
+from dfact.matutils import dag
 import itertools
 import math
 
