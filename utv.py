@@ -367,20 +367,31 @@ def stepUTV_slow(A, b=None, p=5, n_iter=1, verbose=False):
 
 def randUTV(A, b, q=2, p=0):
     """
-    Performs the "optimized" randUTV in Figure4 of the paper.
+    Performs the "optimized" randUTV in Figure4 of the paper. randUTV computes
+    matrices U, T, and V such that A = U @ T @ V^dag. The main diagonal of
+    T approximates the singular values of A, such that truncating the 
+    decomposition to a given r x r block furnishes a rank-r approximation
+    of A.
 
     This is an interface function housing anything we don't want to Jit.
 
     Arguments
     ---------
-    A: (m x n) matrix to be factorized.
-    b (int): block size.
-    q (int): Number of power iterations, a hyperparameter.
-    p (int): Amount of oversampling, a hyperparameter. Currently does nothing.
-    householder:If True, exploit the Householder structure of the QR
-        decompositions to speed up the transformation.
+    A: (m x n) matrix to be factorized. May be complex or real, but presently
+       only single precision is supported.
+    b (int): block size. The matrix will be processed in sets of b columns.
+             At least in infinite precision, this has no effect on the result
+             but may effect performance on massively parallel architectures.
+             For example, on an NVIDIA GPU this should be chosen to be a 
+             multiple of 32.
+    q (int): Number of power iterations, a hyperparameter. Increasing this
+             increases the accuracy of the randomized column sampling at
+             linear cost (in q) in performance.
+    p (int): Amount of oversampling, a hyperparameter. Also increases the
+             accuracy of the column sampling, but apparently only marginally.
     """
-    U, T, V = __randUTV_workforjit(A, b, q, p)
+    #U, T, V = __randUTV_workforjit(A, b, q, p)
+    U, T, V = __randUTV_work(A, b, q, p)
     return [U, T, V]
 
 
@@ -658,8 +669,6 @@ def __randUTV_work(A, b, q, p):
     Arguments
     ---------
     A: (m x n) matrix to be factorized.
-    Gwork: (m x b) matrix that will be used as a work space for the
-           randomized range finder.
     b (int): block size
     q (int): Number of power iterations, a hyperparameter.
     p (int): Amount of oversampling, a hyperparameter. 

@@ -11,23 +11,23 @@ from jax.ops import index_update, index_add, index
 import jax.numpy as jnp
 import numpy as np
 
-import dfact.matutils
+import dfact.matutils as matutils
 from dfact.matutils import dag
 
 ###############################################################################
 # UTILITIES
 ###############################################################################
 @jax.jit
-def sign(number):
+def sign(num):
     """
     Sign function using the standard (?) convention sign(x) = x / |x| in
     the complex case. Returns 0 with the same type as x if x == 0.
     Note the numpy implementation uses the slightly different convention
     sign(x) = x / sqrt(x * x).
     """
-    result = jax.lax.cond(x == 0,
-                          x, lambda x: 0*x,  # 0 with the correct dtype if x==0
-                          x, lambda x: x/jnp.abs(x))  # x/|x| otherwise
+    result = jax.lax.cond(num == 0,
+                          num, lambda num: 0*num,  # 0, casted, if num is 0
+                          num, lambda num: num/jnp.abs(num))  # else x/|x| 
     return result
 
 
@@ -35,7 +35,7 @@ def sign(number):
 # COMPUTATION OF HOUSEHOLDER VECTORS
 ###############################################################################
 @jax.jit
-def house(x):
+def house(x_in):
     """
     Given a real or complex length-m vector x, finds the Householder vector
     v and its inverse normalization tau such that
@@ -50,43 +50,43 @@ def house(x):
 
     Parameters
     ----------
-    x:  array_like, shape(m,)
+    x_in:  array_like, shape(m,)
         The vector about which to compute the Householder reflector. Will
         be flattened (inside this fucntion only) to the prescribed shape.
 
     Output
     ------
-    [v, beta]:
-        v: array_like, shape(m,), the Householder vector including the 1.
+    [v_out, beta]:
+        v_out: array_like, shape(m,), the Householder vector including the 1.
         beta: float, the normalization 2/|v|
     """
-    x = x.ravel()
-    x_2_norm = jnp.linalg.norm(x[1:])
+    x_in = x_in.ravel()
+    x_2_norm = jnp.linalg.norm(x_in[1:])
     # The next two lines are logically equivalent to
     # if x_2_norm == 0:
     #   v, beta = __house_zero_norm(x)
     # else:
     #   v, beta = __house_nonzero_norm( (x, x_2_norm) )
     switch = (x_2_norm == 0)
-    v, beta = jax.lax.cond(switch,
-                           x, __house_zero_norm,
-                           (x, x_2_norm), __house_nonzero_norm)
-    return [v, beta]
+    v_out, beta = jax.lax.cond(switch,
+                               x_in, __house_zero_norm,
+                               (x_in, x_2_norm), __house_nonzero_norm)
+    return [v_out, beta]
 
 
 @jax.jit
-def __house_zero_norm(x):
+def __house_zero_norm(x_in):
     """
     Handles house(x) in the case that norm(x[1:])==0.
     """
     beta = 2.
-    v = x
-    v = index_update(v, index[0], 1.)
-    beta = jax.lax.cond(x[0] == 0,
-                        x, lambda x: x[0]*0,
-                        x, lambda x: x[0]*0 + 2
-                        ).real
-    return [v, beta]
+    v_out = x_in
+    v_out = index_update(v_out, index[0], 1.)
+    beta = jax.lax.cond(x_in[0] == 0,
+                        x_in, lambda x: x[0]*0,
+                        x_in, lambda x: x[0]*0 + 2
+                       ).real
+    return [v_out, beta]
 
 
 @jax.jit
@@ -94,14 +94,14 @@ def __house_nonzero_norm(xtup):
     """
     Handles house(x) in the case that norm(x[1:])!=0.
     """
-    x, x_2_norm = xtup
-    x, x_2_norm = xtup
-    x_norm = jnp.linalg.norm(jnp.array([x[0], x_2_norm]))
-    rho = sign(x[0])*x_norm
+    x_in, x_2_norm = xtup
+    x_in, x_2_norm = xtup
+    x_norm = jnp.linalg.norm(jnp.array([x_in[0], x_2_norm]))
+    rho = sign(x_in[0])*x_norm
 
-    v_1p = x[0] + rho
+    v_1p = x_in[0] + rho
     v_1pabs = jnp.abs(v_1p)
-    v_1m = x[0] - rho
+    v_1m = x_in[0] - rho
     v_1mabs = jnp.abs(v_1m)
 
     # Pick whichever of v[0] = x[0] +- sign(x[0])*||x||
@@ -111,13 +111,13 @@ def __house_nonzero_norm(xtup):
                                (v_1p, v_1pabs), lambda x: x,
                                (v_1m, v_1mabs), lambda x: x)
 
-    v = x
-    v = index_update(v, index[1:], v[1:]/v_1)
-    v = index_update(v, index[0], 1.)
+    v_out = x_in
+    v_out = index_update(v_out, index[1:], v_out[1:]/v_1)
+    v_out = index_update(v_out, index[0], 1.)
     v_2_norm = x_2_norm / v_1abs
     v_norm_sqr = 1 + v_2_norm**2
     beta = (2 / v_norm_sqr).real
-    return [v, beta]
+    return [v_out, beta]
 
 
 ###############################################################################
@@ -330,6 +330,7 @@ def B_times_Q_WY(B, W, YH):
     C = B - (B@W)@YH
     return C
 
+
 @jax.jit
 def Qdag_WY_times_B(B, W, YH):
     """
@@ -338,6 +339,7 @@ def Qdag_WY_times_B(B, W, YH):
     """
     C = B - dag(YH)@(dag(W)@B)
     return C
+
 
 @jax.jit
 def WY_to_Q(W, YH):
@@ -483,6 +485,58 @@ def __house_qr_factored(A):
     return output
 
 
+def __house_qr_factored_scan(A):
+    """
+    Computes the QR decomposition of A in the 'factored' representation.
+    This is a workhorse function to be accessed externally by
+    house_qr(A, mode="factored"), and is documented more extensively in
+    that function's documentation.
+
+    This implementation uses jax.lax.scan to reduce the amount of emitted
+    XLA code.
+
+    This should work for N > M!
+    """
+    H = A
+    M, N = matutils.matshape(A)
+    js_i = jnp.arange(0, M, 1)
+    js_f = jnp.arange(M, N, 1)
+
+    def house_qr_j_lt_m(H, j):
+        m, n = H.shape
+        Htri = jnp.tril(H)
+        v, thisbeta = house_padded(Htri[:, j], j)
+        #  Hjj = jax.lax.dynamic_slice(H, (j, j), (m-j, n-j))  # H[j:, j:]
+        #  H_update = house_leftmult(Hjj, v, thisbeta)
+        #  H = index_update(H, index[:, :],
+        #                   jax.lax.dynamic_update_slice(H, H_update, [j, j]))
+        #  H = index_update(H, index[:, :],
+        #                   jax.lax.dynamic_update_slice(H, v[1:], [j+1, j]))
+        return H, thisbeta
+
+    def house_qr_j_gt_m(H, j):
+        m, n = H.shape
+        this_slice = jax.lax.dynamic_slice(H, (j, j), (m-j, 1))  # H[j:, j]
+        v, thisbeta = house(this_slice)
+        Hjj = jax.lax.dynamic_slice(H, (j, j), (m-j, n-j))  # H[j:, j:]
+        H_update = house_leftmult(Hjj, v, thisbeta)
+        H = index_update(H, index[:, :],
+                         jax.lax.dynamic_update_slice(H, H_update, [j, j]))
+        return H, thisbeta
+
+    #  def house_qr_j_lt_m(H, j):
+    #      m, n = H.shape
+    #      H, thisbeta = house_qr_j_gt_m(H, j)
+    #      v = jax.lax.dynamic_slice(H, (j+1, j), (m-j-1, 1))
+    #      return H, thisbeta
+    H, betas_i = jax.lax.scan(house_qr_j_lt_m, H, js_i)
+    raise ValueError("Meep meep!")
+
+    #H, betas_f = jax.lax.scan(house_qr_j_gt_m, H, js_f)
+
+    betas = jnp.concatenate([betas_i, betas_f])
+    output = [H, betas]
+    return output
 
 
 
