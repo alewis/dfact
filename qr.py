@@ -6,10 +6,12 @@ Adam GM Lewis
 adam.lws@gmail.com
 alewis@perimeterinstitute.ca
 """
+import numpy as np
+import typing
+
 import jax
 from jax.ops import index_update, index_add, index
 import jax.numpy as jnp
-import numpy as np
 
 import dfact.matutils as matutils
 from dfact.matutils import dag
@@ -27,7 +29,7 @@ def sign(num):
     """
     result = jax.lax.cond(num == 0,
                           num, lambda num: 0*num,  # 0, casted, if num is 0
-                          num, lambda num: num/jnp.abs(num))  # else x/|x| 
+                          num, lambda num: num/jnp.abs(num))  # else x/|x|
     return result
 
 
@@ -532,11 +534,132 @@ def __house_qr_factored_scan(A):
     H, betas_i = jax.lax.scan(house_qr_j_lt_m, H, js_i)
     raise ValueError("Meep meep!")
 
-    #H, betas_f = jax.lax.scan(house_qr_j_gt_m, H, js_f)
+    # H, betas_f = jax.lax.scan(house_qr_j_gt_m, H, js_f)
 
     betas = jnp.concatenate([betas_i, betas_f])
     output = [H, betas]
     return output
+
+
+def recursiveQR(A, n_block: int):
+    """
+    Computes the QR decomposition of A using a blocked recursive strategy.
+
+    n_block is a positive blocking parameter. A is recursively partitioned
+    in half
+
+     A (m x n) -> [A0 (m x n//2) | (A1 (m x n//2)]
+
+    until n//2 is less than n_block, in which case the QR decomposition
+    is computed using Jax QR. The matrix equation
+
+    [A0 | A1] = [Q0 | Q1] [ R00 | R01 ]
+                          [  0  | R11 ]
+
+    is then used to reconstruct coarser from finer levels of recursion.
+
+    Since this function ultimately calls Jax linalg, it will support
+    e.g. complex numbers as soon as does the former.
+
+    Parameters
+    ----------
+    A (m x n array-like):  The matrix to be decomposed.
+    n_block:  an integer block-size.
+
+    Returns
+    -------
+    [Q(m x n), R(n x n), A_update], the reduced QR decomposition of A.
+        A would normally have been modified in place during the computation.
+        Since this is not possible with Jax, a work array A_update is instead
+        passed upwards through the recursion.
+    """
+    if n_block < 0:
+        raise ValueError("n_block must be a natural number; it was ", n_block)
+
+    m, n = A.shape
+    if n <= n_block:
+        Q, R = jax.linalg.QR(A, mode="reduced")
+    else:
+        n0 = n//2
+        Q0, R00, A_update = recursiveQR(A[:, :n0], n_block)
+        R01 = dag(Q0) @ A_update[:, n0:n]
+        A_update = index_update(A, index[:, n0:n], A[:, n0:n] - Q0 @ R01)
+
+        Q1, R11, A_update = recursiveQR(A_update[:, n0:n], n_block)
+        Q = jnp.hstack([Q0, Q1])
+
+        R10 = jnp.zeros(R11.shape, R11.dtype)
+        R = jnp.block([
+                        [R00, R01],
+                        [R10, R11]
+                      ])
+        return [Q, R, A_update]
+
+
+def block_power_SVD(A, s: int, tol=1E-6):
+    """
+    Computes the SVD of A using the block power 'Chase' Method.
+
+    The SVD is returned truncated to s; e.g. if A is m x n,
+
+      U[m x s] @ Sigma [s x s] @ dag(V[n x s])
+
+    This method returns the n x s matrix V, not dag(V). To reconstruct A
+    you must first take the dag of V.
+
+    Sigma is returned as a 1D array of length s, representing the diagonal
+    elements (singular values).
+
+    The number of iterations required to converge should be expected to scale
+    with s. It is not possible to compute the full SVD by this method 
+    (or is it?).
+
+    Parameters
+    ----------
+    A (m x n array_like): The matrix to be factored.
+    s: The SVD is returned truncated to this value.
+
+    Returns
+    -------
+    [U, Sigma, V] - The SVD.
+
+    """
+    m, n = A.shape
+    if s < 0 or s >= n:
+        raise ValueError(
+          "s must be a smaller natural number than the columns of A; it was "
+          , s)
+    done = False
+    V = matutils.gaussian_random_fill(jnp.zeros((n, s), dtype=A.dtype))
+    while not done:
+        Ql, Rl = jnp.linalg.QR(A@V, mode="reduced")
+        U = None
+        U = Ql[:, :s]
+
+        Qr, Rr = jnp.linalg.QR(dag(A)@U, mode="reduced")
+        Sigma = jnp.diag(Rr[:s, :s])
+        V = None
+        V = Qr[:, :s]
+
+        err_l = A@V
+        err_r = U*Sigma
+        err = jnp.linalg.norm(jnp.abs(err_l-err_r))
+        done = err < tol
+    return [U, Sigma, V]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
